@@ -8,6 +8,20 @@ from src.utils import load_config
 
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src/alpha'))
 
+alpha_map = {
+    "cross_chain": "cross_chain_arb",
+    "l2_sandwich": "l2_sandwich",
+    "bridge_games": "bridge_games",
+    "mev_share": "mev_share",
+    "flash_loan": "flash_loan",
+    "liquidation": "liquidation",
+    "nftfi": "nftfi",
+    "cross_layer_sandwich": "cross_layer_sandwich",
+    "sequencer_auction_sniper": "sequencer_auction_sniper",
+    "mev_share_intent_sniper": "mev_share_intent_sniper",
+    "flash_loan_liquidation": "flash_loan_liquidation",
+}
+
 def main():
     parser = argparse.ArgumentParser(description="MEV The OG – main entry")
     parser.add_argument("--mode", type=str, default=None, help="test or live")
@@ -29,18 +43,8 @@ def main():
         launch_dashboard(port)
         return
 
-    alpha_map = {
-        "cross_chain": "cross_chain_arb",
-        "l2_sandwich": "l2_sandwich",
-        "bridge_games": "bridge_games",
-        "mev_share": "mev_share",
-        "flash_loan": "flash_loan",
-        "liquidation": "liquidation",
-        "nftfi": "nftfi",
-    }
-
     if args.alpha and args.alpha in alpha_map:
-        mod = __import__(f"src.alpha.{alpha_map[args.alpha]}", fromlist=["run_"+alpha_map[args.alpha]])
+        mod = __import__(f"src.alpha.{alpha_map[args.alpha]}", fromlist=[f"run_{alpha_map[args.alpha]}"])
         getattr(mod, f"run_{alpha_map[args.alpha]}")(config)
     else:
         bot = MEVBot()

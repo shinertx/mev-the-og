@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "mev-the-og"
+version = "0.1.0"
+description = "Production-grade, adversarial MEV trading system"
+authors = ["Your Name <your@email.com>"]
+readme = "README.md"
+packages = [{ include = "src" }]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+web3 = "^6.10.0"
+pyyaml = "^6.0"
+requests = "^2.31.0"
+pydantic = "^2.7.1"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.1.1"
+python-dotenv = "^1.0.1"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

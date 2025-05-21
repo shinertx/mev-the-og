@@ -5,3 +5,6 @@ def test_simulate_l2_sandwich():
     config = load_config("config.yaml")
     simulate_l2_sandwich(config)
     assert True  # If no exceptions, test passes
+
+def run_l2_sandwich(config):
+    simulate_l2_sandwich(config)

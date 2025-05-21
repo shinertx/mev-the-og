@@ -5,7 +5,11 @@ from src.utils import load_config
 
 def scan_l1_for_l2_swaps(w3, target_l2_bridge, poll_interval=15):
     logging.info("[Alpha] Scanning L1 mempool for L2 bridge swaps...")
-    pending = w3.eth.get_block('pending', full_transactions=True)['transactions'][:10]
+    # (In production, filter mempool txs for known bridge calldata)
+    try:
+        pending = w3.eth.get_block('pending', full_transactions=True)['transactions'][:10]
+    except Exception:
+        pending = []
     swaps = []
     for tx in pending:
         if tx['to'] and tx['to'].lower() == target_l2_bridge.lower():

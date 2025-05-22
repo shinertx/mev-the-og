@@ -38,7 +38,7 @@ def test_valid_config_load(tmp_path):
     assert "mainnet" in cfg.rpc_urls.root
 
 def test_env_var_injection(monkeypatch, tmp_path):
-    config_text = VALID_CONFIG.replace("YOUR_INFURA_PROJECT_ID", "SHOULD_BE_REPLACED")
+    config_text = VALID_CONFIG
     cfg_file = tmp_path / "config.yaml"
     cfg_file.write_text(config_text)
     monkeypatch.setenv("INFURA_PROJECT_ID", "abc123xyz")

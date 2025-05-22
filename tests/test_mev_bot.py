@@ -6,11 +6,8 @@ def test_mev_bot_init_and_run(monkeypatch):
     monkeypatch.setenv("ENCRYPTION_PASSWORD", "pass")
     monkeypatch.setenv("PRIVATE_KEY_ENC", enc)
     bot = MEVBot("config.yaml")
-    assert bot.config.network in ["mainnet", "goerli", "sepolia"]
-    assert bot.config.mode in ["test", "live"]
-    assert bot.db is not None
-    monkeypatch.setattr(bot.kill, "is_enabled", lambda: True)
-    async def fake_find():
-        return None
-    monkeypatch.setattr(bot.arb, "find_opportunity", fake_find)
+    assert bot.network in ["mainnet", "goerli", "sepolia"]
+    assert bot.mode in ["test", "live"]
+    monkeypatch.setattr(bot.web3.eth, "block_number", 1)
+    bot.kill.state = bot.kill.RUNNING
     bot.run()

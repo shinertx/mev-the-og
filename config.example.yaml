@@ -29,7 +29,12 @@ notifier:
   telegram:
     enabled: true
     chat_id: "123456789"   # Your Telegram chat ID (do not store the token here)
-    notify_on: ["error", "trade", "kill_switch"]
+    founder_chat_id: "123456789"  # Founder Telegram ID for critical alerts
+  email: "founder@example.com"
+  notify_on: ["error", "trade", "kill_switch"]
+
+kill_switch_max_errors: 3
+kill_switch_enabled: true
 
 signer:
   type: "local"           # "local" or "cloud_kms"

@@ -14,6 +14,13 @@ rpc:
 risk:
   max_drawdown_pct: 5      # Stop trading if drawdown > 5%
   max_loss_usd: 200        # Stop if USD loss > 200
+  max_trade_size_usd: 100  # Max single trade size
+  rolling_window_hours: 24 # Window for loss tracking
+  scale_increment_usd: 10
+  per_alpha:
+    cross_chain:
+      max_loss_usd: 100
+      max_trade_size_usd: 50
 
 alpha:
   enabled: ["cross_chain", "l2_sandwich"]   # List of enabled strategies

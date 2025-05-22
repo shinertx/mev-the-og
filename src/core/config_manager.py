@@ -14,9 +14,16 @@ class NotifierConfig(BaseModel):
     telegram_chat_id: Optional[str] = None
     email: Optional[str] = None
 
+class AlphaRiskConfig(BaseModel):
+    max_loss_usd: Optional[float] = None
+    max_trade_size_usd: Optional[float] = None
+
 class RiskConfig(BaseModel):
     max_drawdown_pct: float = Field(gt=0, lt=100)
     max_loss_usd: float = Field(gt=0)
+    max_trade_size_usd: float = Field(gt=0, default=100)
+    rolling_window_hours: int = Field(gt=0, default=24)
+    per_alpha: Optional[Dict[str, AlphaRiskConfig]] = None
 
 class ContractsConfig(RootModel[Dict[str, str]]):
     pass

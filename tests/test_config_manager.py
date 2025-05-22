@@ -24,6 +24,12 @@ notifier:
 risk:
   max_drawdown_pct: 5
   max_loss_usd: 200
+  max_trade_size_usd: 100
+  rolling_window_hours: 24
+  per_alpha:
+    s1:
+      max_loss_usd: 50
+      max_trade_size_usd: 20
 kill_switch_enabled: true
 target_profit: 0.02
 starting_capital: 2000.0

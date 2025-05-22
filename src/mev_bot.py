@@ -74,8 +74,19 @@ class MEVBot:
             logger.info(f"[MEVBot] Swap success={result.get('success')}")
 
     def run(self):
-        asyncio.run(self.run_arbitrage())
+        print("[MEVBot] Running main bot loop (demo mode)...")
+        latest = self.web3.eth.block_number
+        print(f"[MEVBot] Latest block: {latest}")
 
+        # DEMO: Update risk/kill logic (stub)
+        fake_pnl = 0  # replace with real PnL calc as needed
+        self.risk.update_pnl("global", fake_pnl)
+        self.kill.update_pnl(fake_pnl)
+        if not self.kill.is_enabled():
+            print("[MEVBot] Kill switch triggered. Exiting.")
+            send_telegram("KILL SWITCH: Trading disabled!", self.config['notifier'].get('telegram_token',''), self.config['notifier'].get('telegram_chat_id',''))
+            return
+        # ... extend with further strategies or module hooks
 
 if __name__ == "__main__":
     MEVBot().run()

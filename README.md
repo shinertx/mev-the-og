@@ -28,3 +28,16 @@ Build and operate the world’s most aggressive, adaptive, AI/quant-driven crypt
 - `logs/` – Log output
 - `Dockerfile` – Run anywhere
 - `run.sh` – Example launch script
+
+## Capital & Risk Configuration
+
+`config.yaml` now exposes advanced risk controls:
+
+- `risk.max_drawdown_pct` – global drawdown cap
+- `risk.max_loss_usd` – max loss before pausing
+- `risk.max_trade_size_usd` – base trade cap (auto-scaled)
+- `risk.rolling_window_hours` – window for PnL tracking
+- `risk.per_alpha.{name}.max_loss_usd` – per-strategy loss threshold
+- `risk.per_alpha.{name}.max_trade_size_usd` – per-strategy trade cap
+
+When a threshold is hit the kill switch pauses trading and sends alerts via the configured notifier channels.

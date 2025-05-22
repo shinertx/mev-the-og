@@ -27,6 +27,10 @@ risk:
 kill_switch_enabled: true
 target_profit: 0.02
 starting_capital: 2000.0
+evm_dex_router_abi:
+  - name: swapExactTokensForTokens
+database_path: "/tmp/test.db"
+native_token_price_usd: 2000.0
 """
 
 def test_valid_config_load(tmp_path):
@@ -65,6 +69,13 @@ def test_constraint_violation(tmp_path):
 
 def test_forbid_extra_fields(tmp_path):
     config_text = VALID_CONFIG + "\nprivate_key: 'shouldnotbehere'"
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(config_text)
+    with pytest.raises(RuntimeError):
+        load_app_config(str(cfg_file))
+
+def test_missing_router_abi(tmp_path):
+    config_text = VALID_CONFIG.replace('evm_dex_router_abi:', 'evm_dex_router_abi_missing:')
     cfg_file = tmp_path / "config.yaml"
     cfg_file.write_text(config_text)
     with pytest.raises(RuntimeError):

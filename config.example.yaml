@@ -36,4 +36,13 @@ signer:
   endpoint: "http://localhost:8000"   # If using a local signer service
   key_id: "prod-mev-bot-key"          # If using cloud KMS
 
+contracts:
+  sepolia_uniswap_router: "0xrouter"
+  weth_sepolia: "0xweth"
+  usdc_sepolia: "0xusdc"
+
+evm_dex_router_abi_path: "router_abi.json"
+database_path: "data/bot_state.db"
+native_token_price_usd: 3500.0
+
 # Add more config sections as needed for future strategies

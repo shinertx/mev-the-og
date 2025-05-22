@@ -43,6 +43,15 @@ class AppConfig(BaseModel):
     kill_switch_enabled: Optional[bool] = True
     target_profit: Optional[float] = None
     starting_capital: Optional[float] = None
+    sepolia_router: Optional[str] = None
+    weth_address: Optional[str] = None
+    usdc_address: Optional[str] = None
+    evm_swap_slippage_bps: int = 50
+    evm_gas_priority: str = "medium"
+    evm_dex_router_abi: Optional[list] = None
+    evm_dex_router_abi_path: Optional[str] = None
+    database_path: str = "data/bot_state.db"
+    native_token_price_usd: float = 0.0
 
     model_config = {"extra": "forbid"}  # Strict: forbid extra fields
 
@@ -93,4 +102,6 @@ def load_app_config(config_path: str = "config.yaml") -> AppConfig:
             for v in d:
                 scan_private_key(v)
     scan_private_key(raw_config)
+    if config.sepolia_router and not (config.evm_dex_router_abi or config.evm_dex_router_abi_path):
+        raise RuntimeError("Router ABI must be provided via evm_dex_router_abi or evm_dex_router_abi_path")
     return config

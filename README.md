@@ -17,7 +17,7 @@ Build and operate the world’s most aggressive, adaptive, AI/quant-driven crypt
 
 4. Logs are in `logs/mev_og.log`.
 
-5. See the dashboard:  
+5. See the dashboard:
    `python main.py --dashboard`
 
 ## Structure
@@ -28,3 +28,28 @@ Build and operate the world’s most aggressive, adaptive, AI/quant-driven crypt
 - `logs/` – Log output
 - `Dockerfile` – Run anywhere
 - `run.sh` – Example launch script
+
+## Adversarial Testing
+
+The `tests/adversarial` directory exercises the full bot under hostile
+conditions.  Integration tests launch `MEVBot`, trigger chaos events and
+verify that the kill switch disables trading and all notifiers alert the
+founder.
+
+Covered scenarios include:
+
+- Mainnet fork/reorg using **anvil** or the in-memory chain
+- Gas wars and mempool flooding
+- RPC disconnects and reconnect attempts
+- L1–L2 sandwich or cross-domain replay exploits
+
+Run the entire suite with:
+
+```bash
+pytest -v
+```
+
+If `anvil` is missing, the fork test skips automatically.  CI will fail if
+any adversarial test fails.  When the kill switch triggers, review the logs
+and Telegram/email alerts to confirm the bot halted as expected before
+re-enabling live trading.

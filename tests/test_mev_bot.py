@@ -9,6 +9,11 @@ def test_mev_bot_init_and_run(monkeypatch):
     assert bot.config.network in ["mainnet", "goerli", "sepolia"]
     assert bot.config.mode in ["test", "live"]
     assert bot.db is not None
+    # Setup a test config.yaml with dummy/testnet values first
+    bot = MEVBot("config.example.yaml")
+    assert bot.network in ["mainnet", "goerli", "sepolia"]
+    assert bot.mode in ["test", "live"]
+    # Monkeypatch kill switch to always be enabled for run()
     monkeypatch.setattr(bot.kill, "is_enabled", lambda: True)
     async def fake_find():
         return None

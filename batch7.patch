@@ -1,0 +1,589 @@
+ (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
+diff --git a/README.md b/README.md
+index 9c26e0c..5fb07a9 100644
+--- a/README.md
++++ b/README.md
+@@ -1,30 +1,33 @@
+ # MEV The OG
+ 
+ ## Mission
+ Build and operate the world’s most aggressive, adaptive, AI/quant-driven crypto trading system—targeting $5K starting capital to $10M+ with 1-in-a-billion capital efficiency, survival, and risk controls.
+ 
+ ## Quickstart
+ 
+ 1. Install dependencies:  
+    `pip install -r requirements.txt`
+ 
+ 2. Fill in `config.yaml` (see `.env.example` for env vars).
+ 
+ 3. Run any alpha module:  
+    - `python main.py --mode test --alpha cross_chain`
+    - `python main.py --mode test --alpha mev_share`
+    - (or try any in `src/alpha/`)
+ 
+ 4. Logs are in `logs/mev_og.log`.
+ 
+-5. See the dashboard:  
++5. See the dashboard:
+    `python main.py --dashboard`
+ 
++For detailed onboarding and monitoring instructions see `docs/onboarding.md` and
++`docs/monitoring.md`.
++
+ ## Structure
+ 
+ - `src/alpha/` – All advanced MEV modules
+ - `src/` – Core bot, risk, kill switch, utils, dashboard, notifier
+ - `tests/` – Full test suite
+ - `logs/` – Log output
+ - `Dockerfile` – Run anywhere
+ - `run.sh` – Example launch script
+diff --git a/config.example.yaml b/config.example.yaml
+index 83e06b4..d3965a2 100644
+--- a/config.example.yaml
++++ b/config.example.yaml
+@@ -8,32 +8,34 @@ rpc:
+   mainnet:
+     primary: "https://eth-mainnet.alchemyapi.io/v2/your-api-key"
+     fallback: "https://mainnet.infura.io/v3/your-infura-key"
+   sepolia:
+     primary: "https://eth-sepolia.g.alchemy.com/v2/your-api-key"
+ 
+ risk:
+   max_drawdown_pct: 5      # Stop trading if drawdown > 5%
+   max_loss_usd: 200        # Stop if USD loss > 200
+ 
+ alpha:
+   enabled: ["cross_chain", "l2_sandwich"]   # List of enabled strategies
+   params:
+     cross_chain:
+       min_profit_usd: 20
+       max_slippage: 0.003
+     l2_sandwich:
+       gas_boost: true
+       sandwich_depth: 2
+ 
+ notifier:
+   telegram:
+     enabled: true
+     chat_id: "123456789"   # Your Telegram chat ID (do not store the token here)
+     notify_on: ["error", "trade", "kill_switch"]
++  email: "founder@example.com"
++  slack_webhook: "https://hooks.slack.com/services/T000/B000/XXX"
+ 
+ signer:
+   type: "local"           # "local" or "cloud_kms"
+   endpoint: "http://localhost:8000"   # If using a local signer service
+   key_id: "prod-mev-bot-key"          # If using cloud KMS
+ 
+ # Add more config sections as needed for future strategies
+diff --git a/docs/monitoring.md b/docs/monitoring.md
+new file mode 100644
+index 0000000..e17f023
+--- /dev/null
++++ b/docs/monitoring.md
+@@ -0,0 +1,34 @@
++# Monitoring and DRP Guide
++
++This guide describes how to interpret the dashboard and respond to alerts.
++
++## Dashboard Overview
++
++The root endpoint `/` displays a JSON payload with:
++
++- `risk` – current drawdown
++- `capital_at_risk` – estimated capital in open positions
++- `kill_switch_state` – `OK`, `TRIGGERED`, or `MANUAL_OVERRIDE`
++- `alpha_performance` – per-strategy PnL metrics
++- `notifier_health` – last known status of each notification channel
++- `last_config_event` – last configuration or DRP event
++- `heartbeat` – epoch timestamp of last update
++- `panic` – `true` if a critical event occurred
++
++The `/override` endpoint clears panic state and resets the kill switch.
++
++## Panic Protocols
++
++1. **Immediate alert** – Telegram, email and Slack will receive an alert. If none succeed, `PANIC.log` is written and a console message is printed.
++2. **Check dashboard** – confirm kill switch status and reason in `last_config_event`.
++3. **Mitigate** – fix the underlying issue (e.g., restore config, top up collateral).
++4. **Manual reset** – once safe, POST to `/override` or use the dashboard button to resume trading.
++
++## DRP Steps
++
++Disaster recovery plans (DRP) should reference this guide:
++
++- Backup `config.yaml` and `.env` regularly.
++- Monitor `PANIC.log` for any failed notifications.
++- Use the test suite (`pytest tests/test_critical_events.py`) to verify monitoring before resuming after downtime.
++
+diff --git a/docs/onboarding.md b/docs/onboarding.md
+new file mode 100644
+index 0000000..8a2b2d4
+--- /dev/null
++++ b/docs/onboarding.md
+@@ -0,0 +1,38 @@
++# Onboarding Guide
++
++This document outlines the basic steps for a founder to bring up **MEV The OG** and verify that monitoring works.
++
++1. **Install dependencies**:
++   ```bash
++   pip install -r requirements.txt
++   ```
++2. **Configure environment**:
++   - Copy `config.example.yaml` to `config.yaml` and fill in API keys.
++   - Set `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `EMAIL_TO`, and `SLACK_WEBHOOK` in your environment or `.env`.
++
++3. **Run the bot in test mode**:
++   ```bash
++   python main.py --mode test
++   ```
++   Logs appear in `logs/mev_og.log`.
++
++4. **Launch the dashboard**:
++   ```bash
++   python main.py --dashboard
++   ```
++   Open `http://localhost:8501` to view live metrics.
++
++5. **Verify alerts**:
++   - Trigger a sample risk event by running the test suite:
++     ```bash
++     pytest tests/test_critical_events.py::test_notifier_escalation_fail
++     ```
++   - Check that Telegram, email and Slack/Webhook notifications arrive. If all fail, `PANIC.log` will contain the alert and the console prints a panic message.
++
++6. **Resetting the kill switch**:
++   - The dashboard exposes a `POST /override` endpoint. Click the manual override button or issue:
++     ```bash
++     curl -X POST http://localhost:8501/override
++     ```
++   - This clears the panic state and re-enables trading if you have resolved the issue.
++
+diff --git a/src/core/config_manager.py b/src/core/config_manager.py
+index 76549ad..ccb331b 100644
+--- a/src/core/config_manager.py
++++ b/src/core/config_manager.py
+@@ -1,29 +1,31 @@
+ import os
+ import yaml
+ from dotenv import load_dotenv
+ from typing import Optional, Dict
++
++from ..notifier import Notifier
+ from pydantic import BaseModel, Field, ValidationError, RootModel
+ 
+ # Load .env if present
+ load_dotenv()
+ 
+ # --- Pydantic Models matching your config.yaml ---
+ 
+ class NotifierConfig(BaseModel):
+     telegram_token: Optional[str] = None
+     telegram_chat_id: Optional[str] = None
+     email: Optional[str] = None
+ 
+ class RiskConfig(BaseModel):
+     max_drawdown_pct: float = Field(gt=0, lt=100)
+     max_loss_usd: float = Field(gt=0)
+ 
+ class ContractsConfig(RootModel[Dict[str, str]]):
+     pass
+ 
+ class RPCUrlsConfig(RootModel[Dict[str, str]]):
+     pass
+ 
+ class WSSUrlsConfig(RootModel[Dict[str, Optional[str]]]):
+     pass
+ 
+@@ -51,46 +53,50 @@ class AppConfig(BaseModel):
+ def overlay_env_vars(raw_config: dict):
+     infura_id = os.getenv("INFURA_PROJECT_ID")
+     if infura_id:
+         # RPC URLs
+         if "rpc_urls" in raw_config:
+             for k, v in raw_config["rpc_urls"].items():
+                 if isinstance(v, str) and "YOUR_INFURA_PROJECT_ID" in v:
+                     raw_config["rpc_urls"][k] = v.replace("YOUR_INFURA_PROJECT_ID", infura_id)
+         # WSS URLs
+         if "wss_urls" in raw_config:
+             for k, v in raw_config["wss_urls"].items():
+                 if isinstance(v, str) and "YOUR_INFURA_PROJECT_ID" in v:
+                     raw_config["wss_urls"][k] = v.replace("YOUR_INFURA_PROJECT_ID", infura_id)
+     telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
+     if telegram_token:
+         if "notifier" not in raw_config or raw_config["notifier"] is None:
+             raw_config["notifier"] = {}
+         raw_config["notifier"]["telegram_token"] = telegram_token
+     telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
+     if telegram_chat_id:
+         if "notifier" not in raw_config or raw_config["notifier"] is None:
+             raw_config["notifier"] = {}
+         raw_config["notifier"]["telegram_chat_id"] = telegram_chat_id
+     return raw_config
+ 
+-def load_app_config(config_path: str = "config.yaml") -> AppConfig:
++def load_app_config(config_path: str = "config.yaml", notifier: Optional[Notifier] = None) -> AppConfig:
+     with open(config_path, "r") as f:
+         raw_config = yaml.safe_load(f)
+     raw_config = overlay_env_vars(raw_config)
+     try:
+         config = AppConfig(**raw_config)
+     except ValidationError as e:
++        if notifier:
++            notifier.escalate_event("config", f"Validation failed: {e}")
+         raise RuntimeError(f"Config validation failed:\n{e}")
+ 
+     # Forbid private key in config
+     def scan_private_key(d):
+         if isinstance(d, dict):
+             for k, v in d.items():
+                 if "private_key" in k.lower():
++                    if notifier:
++                        notifier.escalate_event("config", "Private key detected in config")
+                     raise AssertionError("Private key must not be loaded in config!")
+                 scan_private_key(v)
+         elif isinstance(d, list):
+             for v in d:
+                 scan_private_key(v)
+     scan_private_key(raw_config)
+     return config
+diff --git a/src/dashboard.py b/src/dashboard.py
+index c59c59a..de4d604 100644
+--- a/src/dashboard.py
++++ b/src/dashboard.py
+@@ -1,11 +1,39 @@
++"""Lightweight operator dashboard."""
++
++import time
++from dataclasses import dataclass, asdict
+ from fastapi import FastAPI
+ import uvicorn
+ 
+-def launch_dashboard(port=8501):
++
++@dataclass
++class DashboardState:
++    risk: float = 0.0
++    capital_at_risk: float = 0.0
++    kill_switch_state: str = "OK"
++    alpha_performance: dict = None
++    notifier_health: dict = None
++    last_config_event: str = "None"
++    heartbeat: float = time.time()
++    panic: bool = False
++
++
++state = DashboardState(alpha_performance={}, notifier_health={})
++
++
++def launch_dashboard(port: int = 8501, state_obj: DashboardState = state):
++    """Launch the FastAPI dashboard exposing internal state."""
++
+     app = FastAPI()
+ 
+     @app.get("/")
+     def status():
+-        return {"status": "MEV The OG is live", "pnl": 0}
++        return asdict(state_obj)
++
++    @app.post("/override")
++    def override_kill_switch():
++        state_obj.kill_switch_state = "MANUAL_OVERRIDE"
++        state_obj.panic = False
++        return {"status": "override engaged"}
+ 
+     uvicorn.run(app, host="0.0.0.0", port=port)
+diff --git a/src/kill_switch.py b/src/kill_switch.py
+index bb63879..5170dad 100644
+--- a/src/kill_switch.py
++++ b/src/kill_switch.py
+@@ -1,27 +1,36 @@
+ import logging
++from typing import Optional
++
++from .notifier import Notifier
+ 
+ class KillSwitch:
+-    def __init__(self, config):
++    def __init__(self, config, notifier: Optional[Notifier] = None):
+         self.enabled = config.get("kill_switch_enabled", True)
+         self.max_drawdown_pct = config.get("risk", {}).get("max_drawdown_pct", 5)
+         self.max_loss_usd = config.get("risk", {}).get("max_loss_usd", 200)
+         self.trading_enabled = True
+         self.pnl_history = []
++        self.notifier = notifier
+ 
+     def update_pnl(self, pnl_usd):
+         self.pnl_history.append(pnl_usd)
+         if len(self.pnl_history) > 100:
+             self.pnl_history = self.pnl_history[-100:]
+         self._check_risk()
+ 
+     def _check_risk(self):
+         if not self.enabled:
+             return
+         total_pnl = sum(self.pnl_history)
+         min_pnl = min(self.pnl_history) if self.pnl_history else 0
+         if abs(min_pnl) > self.max_loss_usd or (total_pnl < 0 and abs(total_pnl) > self.max_loss_usd):
+             self.trading_enabled = False
+             logging.critical("[KILL SWITCH] Triggered: max loss exceeded. Trading disabled.")
++            if self.notifier:
++                self.notifier.escalate_event(
++                    "kill_switch",
++                    "Max loss exceeded. Trading disabled.",
++                )
+ 
+     def is_enabled(self):
+         return self.trading_enabled
+diff --git a/src/mev_bot.py b/src/mev_bot.py
+index e6396ee..de21018 100644
+--- a/src/mev_bot.py
++++ b/src/mev_bot.py
+@@ -1,37 +1,43 @@
+ import time
+ from web3 import Web3
+ from .utils import load_config
+ from .risk_manager import RiskManager
+ from .kill_switch import KillSwitch
+-from .notifier import send_telegram
++from .notifier import Notifier
++from .dashboard import state as dashboard_state
+ 
+ class MEVBot:
+     def __init__(self, config_path="config.yaml"):
+         self.config = load_config(config_path)
+         self.network = self.config.get("network")
+         self.mode = self.config.get("mode")
+         self.alchemy_api_key = self.config.get("alchemy_api_key")
+         self.web3 = Web3(Web3.HTTPProvider(f"https://eth-{self.network}.g.alchemy.com/v2/{self.alchemy_api_key}"))
+         self.wallet = self.config.get("wallet_address")
+-        self.risk = RiskManager(self.config)
+-        self.kill = KillSwitch(self.config)
++        self.notifier = Notifier(self.config.get("notifier", {}))
++        self.risk = RiskManager(self.config, notifier=self.notifier)
++        self.kill = KillSwitch(self.config, notifier=self.notifier)
+         print(f"[MEVBot] Initialized in {self.mode.upper()} mode on {self.network}")
+ 
+     def run(self):
+         print("[MEVBot] Running main bot loop (demo mode)...")
+         latest = self.web3.eth.block_number
+         print(f"[MEVBot] Latest block: {latest}")
+ 
+         # DEMO: Update risk/kill logic (stub)
+         fake_pnl = 0  # replace with real PnL calc as needed
+         self.risk.update_drawdown(fake_pnl)
+         self.kill.update_pnl(fake_pnl)
++        dashboard_state.risk = self.risk.current_drawdown
++        dashboard_state.kill_switch_state = "OK" if self.kill.is_enabled() else "TRIGGERED"
++        dashboard_state.heartbeat = time.time()
+         if not self.kill.is_enabled():
+             print("[MEVBot] Kill switch triggered. Exiting.")
+-            send_telegram("KILL SWITCH: Trading disabled!", self.config['notifier'].get('telegram_token',''), self.config['notifier'].get('telegram_chat_id',''))
++            self.notifier.escalate_event("kill_switch", "Trading disabled")
++            dashboard_state.panic = True
+             return
+         # ... extend with further strategies or module hooks
+ 
+ if __name__ == "__main__":
+     bot = MEVBot()
+     bot.run()
+diff --git a/src/notifier.py b/src/notifier.py
+index 3df548d..f8b9c47 100644
+--- a/src/notifier.py
++++ b/src/notifier.py
+@@ -1,17 +1,78 @@
++"""Multi-channel notifier utilities."""
++
+ import logging
+ import requests
++from typing import Optional, Dict, List
++
++
++class Notifier:
++    """Send alerts to multiple channels.
++
++    The implementation intentionally keeps network calls simple so unit tests can
++    monkeypatch the send functions without requiring real network access.
++    """
++
++    def __init__(self, cfg: Optional[Dict[str, str]] = None):
++        cfg = cfg or {}
++        self.telegram_token = cfg.get("telegram_token")
++        self.telegram_chat_id = cfg.get("telegram_chat_id")
++        self.email = cfg.get("email")
++        self.slack_webhook = cfg.get("slack_webhook")
++
++    # --- Channel helpers -------------------------------------------------
++    def _send_telegram(self, msg: str) -> bool:
++        if not self.telegram_token or not self.telegram_chat_id:
++            logging.info("[Notifier] Telegram not configured.")
++            return False
++        url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
++        try:
++            requests.post(url, data={"chat_id": self.telegram_chat_id, "text": msg})
++            logging.info("[Notifier] Sent Telegram message.")
++            return True
++        except Exception as e:
++            logging.warning(f"[Notifier] Failed Telegram: {e}")
++            return False
++
++    def _send_email(self, msg: str) -> bool:
++        if not self.email:
++            logging.info("[Notifier] Email not configured.")
++            return False
++        # Placeholder – integrate with real provider (SMTP, SendGrid, etc.)
++        logging.info(f"[Notifier] Would send email to {self.email}: {msg}")
++        return True
++
++    def _send_slack(self, msg: str) -> bool:
++        if not self.slack_webhook:
++            logging.info("[Notifier] Slack not configured.")
++            return False
++        try:
++            requests.post(self.slack_webhook, json={"text": msg})
++            logging.info("[Notifier] Sent Slack message.")
++            return True
++        except Exception as e:
++            logging.warning(f"[Notifier] Failed Slack: {e}")
++            return False
++
++    # --- Public API ------------------------------------------------------
++    def escalate_event(self, event: str, msg: str) -> None:
++        """Send the message to all configured channels.
++
++        If every channel fails, append to ``PANIC.log`` and print to console for
++        immediate operator visibility.
++        """
++
++        results: List[bool] = [
++            self._send_telegram(f"[{event.upper()}] {msg}"),
++            self._send_email(f"[{event.upper()}] {msg}"),
++            self._send_slack(f"[{event.upper()}] {msg}"),
++        ]
++
++        if not any(results):
++            logging.critical("[Notifier] ALL channels failed! Writing to PANIC.log")
++            try:
++                with open("PANIC.log", "a") as f:
++                    f.write(f"{event.upper()}: {msg}\n")
++            except Exception as e:  # pragma: no cover - extremely unlikely
++                logging.error(f"[Notifier] Failed to write PANIC.log: {e}")
++            print(f"[PANIC] {event.upper()}: {msg}")
+ 
+-def send_telegram(msg, token, chat_id):
+-    if not token or not chat_id:
+-        logging.info("[Notifier] Telegram not configured.")
+-        return
+-    url = f"https://api.telegram.org/bot{token}/sendMessage"
+-    try:
+-        requests.post(url, data={"chat_id": chat_id, "text": msg})
+-        logging.info("[Notifier] Sent Telegram message.")
+-    except Exception as e:
+-        logging.warning(f"[Notifier] Failed Telegram: {e}")
+-
+-def send_email(msg, email):
+-    # Placeholder – integrate with SendGrid, SMTP, etc.
+-    logging.info(f"[Notifier] Would send email to {email}: {msg}")
+diff --git a/src/risk_manager.py b/src/risk_manager.py
+index 1c2f6b0..f330b55 100644
+--- a/src/risk_manager.py
++++ b/src/risk_manager.py
+@@ -1,21 +1,30 @@
+ import logging
++from typing import Optional
++
++from .notifier import Notifier
+ 
+ class RiskManager:
+-    def __init__(self, config):
++    def __init__(self, config, notifier: Optional[Notifier] = None):
+         self.max_drawdown_pct = config.get("risk", {}).get("max_drawdown_pct", 5)
+         self.max_loss_usd = config.get("risk", {}).get("max_loss_usd", 200)
+         self.max_trade_size_usd = config.get("trade_amount_usd", 100)
+         self.current_drawdown = 0
++        self.notifier = notifier
+ 
+     def check_trade(self, trade_size_usd):
+         if trade_size_usd > self.max_trade_size_usd:
+             logging.warning("[RiskManager] Trade size too large, reducing.")
+             return self.max_trade_size_usd
+         return trade_size_usd
+ 
+     def update_drawdown(self, pnl):
+         self.current_drawdown += pnl
+         if abs(self.current_drawdown) > self.max_loss_usd:
+             logging.critical("[RiskManager] Max drawdown breached!")
++            if self.notifier:
++                self.notifier.escalate_event(
++                    "risk",
++                    "Max drawdown breached",
++                )
+             return False
+         return True
+diff --git a/tests/test_critical_events.py b/tests/test_critical_events.py
+new file mode 100644
+index 0000000..c5da1f9
+--- /dev/null
++++ b/tests/test_critical_events.py
+@@ -0,0 +1,56 @@
++from src.notifier import Notifier
++from src.kill_switch import KillSwitch
++from src.risk_manager import RiskManager
++from src.core.config_manager import load_app_config
++
++
++class DummyNotifier(Notifier):
++    def __init__(self):
++        super().__init__({})
++        self.events = []
++
++    def _send_telegram(self, msg):
++        self.events.append(msg)
++        return True
++
++    _send_email = _send_telegram
++    _send_slack = _send_telegram
++
++
++def test_kill_switch_escalation(tmp_path):
++    cfg = {"risk": {"max_loss_usd": 1}, "kill_switch_enabled": True}
++    notifier = DummyNotifier()
++    kill = KillSwitch(cfg, notifier=notifier)
++    kill.update_pnl(-5)
++    assert not kill.is_enabled()
++    assert any("KILL_SWITCH" in e for e in notifier.events)
++
++
++def test_risk_manager_escalation():
++    cfg = {"risk": {"max_loss_usd": 1}, "trade_amount_usd": 1}
++    notifier = DummyNotifier()
++    risk = RiskManager(cfg, notifier=notifier)
++    assert not risk.update_drawdown(-5)
++    assert any("RISK" in e for e in notifier.events)
++
++
++def test_notifier_escalation_fail(tmp_path, monkeypatch):
++    n = Notifier({"telegram_token": "bad", "telegram_chat_id": "1", "email": "a@b", "slack_webhook": "http://example.com"})
++    monkeypatch.setattr(n, "_send_telegram", lambda m: False)
++    monkeypatch.setattr(n, "_send_email", lambda m: False)
++    monkeypatch.setattr(n, "_send_slack", lambda m: False)
++    panic_file = tmp_path / "PANIC.log"
++    monkeypatch.chdir(tmp_path)
++    n.escalate_event("risk", "fail test")
++    assert panic_file.read_text().strip() == "RISK: fail test"
++
++
++def test_config_tamper(tmp_path):
++    cfg_file = tmp_path / "config.yaml"
++    cfg_file.write_text("network: mainnet\nprivate_key: bad")
++    notifier = DummyNotifier()
++    try:
++        load_app_config(str(cfg_file), notifier=notifier)
++    except AssertionError:
++        pass
++    assert any("CONFIG" in e for e in notifier.events)
+ 
+EOF
+)

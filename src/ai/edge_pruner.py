@@ -2,19 +2,28 @@ import logging
 import json
 import os
 
-def prune_dead_edges(module_perf_log="logs/module_performance.json", threshold=-0.01):
+from src.logger import log_event
+from .strategy_scorer import score_strategy
+
+def prune_dead_edges(config, module_perf_log="logs/module_performance.json"):
+    """Disable edges whose score falls below threshold."""
+    threshold = config.get("ai", {}).get("decay_threshold", -0.01)
+    weights = config.get("ai", {}).get("scoring", {})
     if not os.path.exists(module_perf_log):
-        logging.info("[EdgePruner] No performance log found.")
+        log_event(logging.INFO, "No performance log found.", "pruner")
         return []
     with open(module_perf_log, "r") as f:
         perf = json.load(f)
     killed = []
     for mod, stats in perf.items():
-        if stats.get("avg_pnl", 0) < threshold or stats.get("fail_count", 0) > 2:
-            logging.warning(f"[EdgePruner] Killing module {mod} due to PnL decay or repeated fails.")
+        score = score_strategy(stats, weights)
+        if score < threshold or stats.get("fail_count", 0) > 2:
+            log_event(logging.WARNING, f"Killing module {mod} score {score}", "pruner")
             killed.append(mod)
-            # (Optionally) disable in config, move to archive, etc.
     return killed
 
 if __name__ == "__main__":
-    print(prune_dead_edges())
+    from src.utils import load_config
+    cfg = load_config("config.yaml")
+    log_event(logging.INFO, "Pruner run standalone", "pruner")
+    print(prune_dead_edges(cfg))

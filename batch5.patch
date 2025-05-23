@@ -1,0 +1,679 @@
+ (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
+diff --git a/README.md b/README.md
+index 9c26e0c..83ad69e 100644
+--- a/README.md
++++ b/README.md
+@@ -6,25 +6,59 @@ Build and operate the world’s most aggressive, adaptive, AI/quant-driven crypt
+ ## Quickstart
+ 
+ 1. Install dependencies:  
+    `pip install -r requirements.txt`
+ 
+ 2. Fill in `config.yaml` (see `.env.example` for env vars).
+ 
+ 3. Run any alpha module:  
+    - `python main.py --mode test --alpha cross_chain`
+    - `python main.py --mode test --alpha mev_share`
+    - (or try any in `src/alpha/`)
+ 
+ 4. Logs are in `logs/mev_og.log`.
+ 
+ 5. See the dashboard:  
+    `python main.py --dashboard`
+ 
+ ## Structure
+ 
+ - `src/alpha/` – All advanced MEV modules
+ - `src/` – Core bot, risk, kill switch, utils, dashboard, notifier
+ - `tests/` – Full test suite
+ - `logs/` – Log output
+ - `Dockerfile` – Run anywhere
+ - `run.sh` – Example launch script
++
++## AI Mutation & Pruning
++
++The `src/ai/` folder contains automation helpers:
++
++- **parameter_mutator.py** – live parameter mutation based on the `ai.mutation_frequency` setting.
++- **strategy_scorer.py** – calculates edge scores using weights from `ai.scoring`.
++- **edge_pruner.py** – disables strategies when their score drops below `ai.decay_threshold`.
++
++All AI events are logged with UTC timestamps and the active config hash. Review
++`logs/mev_og.log` or `logs/ai_demo.log` to audit mutations and prunes.
++
++### Recovering from a prune
++1. Inspect the log entry to identify which module was disabled.
++2. Re-add the module to `alpha.enabled` in `config.yaml` and reset its entry in
++   `logs/module_performance.json`.
++
++### Tuning mutation logic
++Edit the values under `ai:` in `config.yaml`:
++
++- `mutation_frequency` – how often parameter mutation runs.
++- `decay_threshold` – minimum score before pruning.
++- `scoring` – weights for `winrate`, `avg_pnl` and `fail_count`.
++
++### Reviewing logs
++Logs are plaintext with UTC timestamps and config hash prefixes. They can be
++parsed by other tools or LLMs for optimization.
++
++Run the demonstration script:
++
++```bash
++python examples/ai_flow_demo.py
++```
++
+diff --git a/config.example.yaml b/config.example.yaml
+index 83e06b4..09bd1eb 100644
+--- a/config.example.yaml
++++ b/config.example.yaml
+@@ -14,26 +14,34 @@ rpc:
+ risk:
+   max_drawdown_pct: 5      # Stop trading if drawdown > 5%
+   max_loss_usd: 200        # Stop if USD loss > 200
+ 
+ alpha:
+   enabled: ["cross_chain", "l2_sandwich"]   # List of enabled strategies
+   params:
+     cross_chain:
+       min_profit_usd: 20
+       max_slippage: 0.003
+     l2_sandwich:
+       gas_boost: true
+       sandwich_depth: 2
+ 
+ notifier:
+   telegram:
+     enabled: true
+     chat_id: "123456789"   # Your Telegram chat ID (do not store the token here)
+     notify_on: ["error", "trade", "kill_switch"]
+ 
+ signer:
+   type: "local"           # "local" or "cloud_kms"
+   endpoint: "http://localhost:8000"   # If using a local signer service
+   key_id: "prod-mev-bot-key"          # If using cloud KMS
+ 
++ai:
++  mutation_frequency: 10        # mutate params every N cycles
++  decay_threshold: -0.01        # prune strategies below this score
++  scoring:
++    winrate_weight: 0.5
++    pnl_weight: 0.5
++    fail_weight: 0.1
++
+ # Add more config sections as needed for future strategies
+diff --git a/examples/ai_flow_demo.py b/examples/ai_flow_demo.py
+new file mode 100644
+index 0000000..815133d
+--- /dev/null
++++ b/examples/ai_flow_demo.py
+@@ -0,0 +1,24 @@
++import json
++import logging
++
++from src.utils import load_config
++from src.logger import setup_logging, log_event
++from src.ai.parameter_mutator import ParameterMutator
++from src.ai.edge_pruner import prune_dead_edges
++from src.ai.strategy_scorer import score_strategy
++
++if __name__ == "__main__":
++    cfg = load_config("config.yaml")
++    setup_logging(cfg, "logs/ai_demo.log")
++    mut = ParameterMutator(cfg)
++    mut.maybe_mutate("cross_chain")
++
++    sample_stats = {"winrate": 0.4, "avg_pnl": -0.03, "fail_count": 2}
++    score = score_strategy(sample_stats, cfg.get("ai", {}).get("scoring", {}))
++    log_event(logging.INFO, f"Demo edge score {score}", "demo")
++
++    perf_file = "logs/module_performance.json"
++    with open(perf_file, "w") as f:
++        json.dump({"cross_chain": sample_stats}, f)
++    killed = prune_dead_edges(cfg, perf_file)
++    log_event(logging.INFO, f"Pruner removed: {killed}", "demo")
+diff --git a/main.py b/main.py
+index 8623585..7072925 100644
+--- a/main.py
++++ b/main.py
+@@ -9,46 +9,48 @@ from src.utils import load_config
+ sys.path.append(os.path.join(os.path.dirname(__file__), 'src/alpha'))
+ 
+ alpha_map = {
+     "cross_chain": "cross_chain_arb",
+     "l2_sandwich": "l2_sandwich",
+     "bridge_games": "bridge_games",
+     "mev_share": "mev_share",
+     "flash_loan": "flash_loan",
+     "liquidation": "liquidation",
+     "nftfi": "nftfi",
+     "cross_layer_sandwich": "cross_layer_sandwich",
+     "sequencer_auction_sniper": "sequencer_auction_sniper",
+     "mev_share_intent_sniper": "mev_share_intent_sniper",
+     "flash_loan_liquidation": "flash_loan_liquidation",
+ }
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="MEV The OG – main entry")
+     parser.add_argument("--mode", type=str, default=None, help="test or live")
+     parser.add_argument("--alpha", type=str, default=None, help="alpha module: cross_chain, l2_sandwich, bridge_games, mev_share, flash_loan, liquidation, nftfi")
+     parser.add_argument("--dashboard", action="store_true", help="launch dashboard")
+     args = parser.parse_args()
+ 
+     # Setup logging
+     os.makedirs('logs', exist_ok=True)
+-    logging.basicConfig(filename='logs/mev_og.log', level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+-
++    from src.logger import setup_logging
+     config = load_config("config.yaml")
+     if args.mode:
+         config['mode'] = args.mode
++    setup_logging(config)
++
++    # config already loaded above
+ 
+     if args.dashboard:
+         from src.dashboard import launch_dashboard
+         port = config.get('dashboard', {}).get('port', 8501)
+         launch_dashboard(port)
+         return
+ 
+     if args.alpha and args.alpha in alpha_map:
+         mod = __import__(f"src.alpha.{alpha_map[args.alpha]}", fromlist=[f"run_{alpha_map[args.alpha]}"])
+         getattr(mod, f"run_{alpha_map[args.alpha]}")(config)
+     else:
+         bot = MEVBot()
+         bot.run()
+ 
+ if __name__ == "__main__":
+     main()
+diff --git a/src/ai/ai_orchestrator.py b/src/ai/ai_orchestrator.py
+index 0fbe90e..be21b3e 100644
+--- a/src/ai/ai_orchestrator.py
++++ b/src/ai/ai_orchestrator.py
+@@ -1,94 +1,95 @@
+ import time
+ import logging
+ import importlib
+ import openai
+ import os
+ from src.utils import load_config
++from src.logger import setup_logging, log_event
+ 
+ OPENAI_MODEL = "gpt-4o"  # Or use "gpt-3.5-turbo" if needed
+ 
+ class AIOrchestrator:
+     def __init__(self, config_path="config.yaml"):
+         self.config_path = config_path
+         self.config = load_config(config_path)
++        setup_logging(self.config)
+         openai.api_key = os.environ.get("OPENAI_API_KEY")
+         self.alpha_modules = [
+             "cross_chain_arb",
+             "l2_sandwich",
+             "bridge_games",
+             "mev_share",
+             "flash_loan",
+             "liquidation",
+             "nftfi",
+             "edge_bridge_arb"
+         ]
+         self.module_results = {}
+ 
+     def run_module(self, module_name, mode="test"):
+         try:
+-            logging.info(f"[AIOrchestrator] Running {module_name} in {mode} mode")
++            log_event(logging.INFO, f"Running {module_name} in {mode} mode", "orchestrator")
+             mod = importlib.import_module(f"src.alpha.{module_name}")
+             run_func = getattr(mod, f"run_{module_name}", None)
+             if run_func:
+                 run_func(self.config)
+                 self.module_results[module_name] = "success"
++                log_event(logging.INFO, f"Module {module_name} success", "orchestrator")
+             else:
+-                logging.warning(f"[AIOrchestrator] No run_{module_name} function in {module_name}.py")
++                log_event(logging.WARNING, f"No run_{module_name} function in {module_name}.py", "orchestrator")
+                 self.module_results[module_name] = "missing_run_func"
+         except Exception as e:
+-            logging.warning(f"[AIOrchestrator] Module {module_name} failed: {e}")
++            log_event(logging.WARNING, f"Module {module_name} failed: {e}", "orchestrator")
+             self.module_results[module_name] = f"fail: {e}"
+ 
+     def get_logs(self, log_path="logs/mev_og.log", n=100):
+         try:
+             with open(log_path, "r") as f:
+                 lines = f.readlines()
+                 return "".join(lines[-n:])
+         except Exception as e:
+             return f"Failed to read logs: {e}"
+ 
+     def openai_analyze_logs(self, logs):
+         prompt = (
+             "You are a world-class adversarial DeFi/MEV quant. "
+             "Given these bot logs, identify any new arbitrage/MEV opportunities, vulnerabilities, and suggest new edges or parameter tweaks "
+             "that would maximize edge or reduce risk. Output only actionable recommendations and code/config edits if relevant.\n\n"
+             "LOGS:\n" + logs
+         )
+         try:
+             resp = openai.ChatCompletion.create(
+                 model=OPENAI_MODEL,
+                 messages=[
+                     {"role": "system", "content": "You are a world-class MEV quant research agent."},
+                     {"role": "user", "content": prompt}
+                 ],
+                 temperature=0.2,
+                 max_tokens=700,
+             )
+             return resp["choices"][0]["message"]["content"]
+         except Exception as e:
+             return f"[AIOrchestrator] OpenAI analysis failed: {e}"
+ 
+     def main_loop(self, interval_sec=600):
+-        logging.info("[AIOrchestrator] Starting perpetual alpha coordination loop.")
++        log_event(logging.INFO, "Starting perpetual alpha coordination loop.", "orchestrator")
+         while True:
+             for module in self.alpha_modules:
+                 self.run_module(module, mode=self.config.get("mode", "test"))
+                 time.sleep(3)  # Stagger modules
+ 
+             logs = self.get_logs()
+             ai_recommendations = self.openai_analyze_logs(logs)
+-            logging.info(f"[AIOrchestrator][OpenAI] Alpha/edge recommendations:\n{ai_recommendations}")
++            log_event(logging.INFO, f"OpenAI recommendations:\n{ai_recommendations}", "orchestrator")
+ 
+             # Optional: Auto-update config/params based on LLM suggestions (require human-in-the-loop for prod safety)
+             if "PROMOTE TO LIVE" in ai_recommendations and self.config.get("mode") != "live":
+                 logging.info("[AIOrchestrator] OpenAI recommends switching to live mode! (manual approval required)")
+                 # (Optional) Hook for notification/approval here
+ 
+             # Sleep until next cycle
+             time.sleep(interval_sec)
+ 
+ if __name__ == "__main__":
+-    import sys
+-    logging.basicConfig(filename="logs/mev_og.log", level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+     orchestrator = AIOrchestrator()
+     orchestrator.main_loop()
+diff --git a/src/ai/alpha_scraper.py b/src/ai/alpha_scraper.py
+index ff8225f..7def339 100644
+--- a/src/ai/alpha_scraper.py
++++ b/src/ai/alpha_scraper.py
+@@ -1,84 +1,90 @@
+ import logging
+ import requests
+ import os
+ import time
+ import openai
+ 
++from src.logger import log_event
++
+ # If using OpenAI for summarization
+ openai.api_key = os.environ.get("OPENAI_API_KEY")
+ OPENAI_MODEL = "gpt-4o"
+ 
+ def fetch_twitter_feed(keywords):
+     # Use a paid Twitter API or scrape Nitter as fallback (demo)
+     tweets = []
+     for kw in keywords:
+         try:
+             resp = requests.get(f"https://nitter.net/search?f=tweets&q={kw}+MEV", timeout=8)
+             if resp.status_code == 200:
+                 tweets.append(resp.text[:1500])  # For demo, real version would parse HTML for tweet text
+         except Exception as e:
+-            logging.warning(f"[AlphaScraper] Twitter fetch fail: {e}")
++            log_event(logging.WARNING, f"Twitter fetch fail: {e}", "alpha_scraper")
+     return "\n\n".join(tweets)
+ 
+ def fetch_github_feed(repos):
+     commits = []
+     for repo in repos:
+         try:
+             resp = requests.get(f"https://api.github.com/repos/{repo}/commits")
+             if resp.ok:
+                 for commit in resp.json()[:2]:
+                     msg = commit['commit']['message']
+                     commits.append(f"{repo}: {msg}")
+         except Exception as e:
+-            logging.warning(f"[AlphaScraper] Github fetch fail: {e}")
++            log_event(logging.WARNING, f"Github fetch fail: {e}", "alpha_scraper")
+     return "\n\n".join(commits)
+ 
+ def fetch_dune_dashboard(dashboard_id):
+     # Dune API is paid, so just simulate for demo
+     return f"Simulated Dune dashboard {dashboard_id} result..."
+ 
+ def fetch_telegram_feed(channel):
+     # Use Telegram Bot API to get messages, or simulate (demo)
+     return f"Simulated latest messages from {channel}"
+ 
+ def summarize_alpha(feed_text):
+     prompt = (
+         "Summarize any actionable new MEV or DeFi alpha, bridge exploits, sandwich attacks, or arbitrage leaks in this feed. "
+         "Output: actionable code/config snippets, or recommendations only."
+         f"\n\nFEED:\n{feed_text}"
+     )
+     try:
+         resp = openai.ChatCompletion.create(
+             model=OPENAI_MODEL,
+             messages=[{"role": "system", "content": "You are an adversarial MEV alpha hunter."},
+                       {"role": "user", "content": prompt}],
+             temperature=0.3,
+             max_tokens=600,
+         )
+         return resp["choices"][0]["message"]["content"]
+     except Exception as e:
+         return f"[AlphaScraper] OpenAI failed: {e}"
+ 
+ def run_alpha_scraper():
+     # Add relevant alpha keywords and channels
+     twitter_keywords = ["bridge exploit", "L2 MEV", "cross-chain arb", "sequencer auction"]
+     github_repos = ["flashbots/mev-share", "offchainlabs/arbitrum"]
+     dune_dashboards = ["4710832"]  # Dune dashboard IDs
+     telegram_channels = ["blockchainalpha", "mevsignals"]
+ 
+     feed = []
+     feed.append(fetch_twitter_feed(twitter_keywords))
+     feed.append(fetch_github_feed(github_repos))
+     for dash in dune_dashboards:
+         feed.append(fetch_dune_dashboard(dash))
+     for chan in telegram_channels:
+         feed.append(fetch_telegram_feed(chan))
+ 
+     combined_feed = "\n\n".join(feed)
+     summary = summarize_alpha(combined_feed)
+-    logging.info(f"[AlphaScraper][Summary] {summary}")
++    log_event(logging.INFO, f"Summary {summary}", "alpha_scraper")
+     return summary
+ 
+ if __name__ == "__main__":
+-    logging.basicConfig(filename="logs/mev_og.log", level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
++    from src.utils import load_config
++    from src.logger import setup_logging
++    cfg = load_config("config.yaml")
++    setup_logging(cfg)
++    log_event(logging.INFO, "Alpha scraper standalone run", "alpha_scraper")
+     print(run_alpha_scraper())
+diff --git a/src/ai/auto_scaler.py b/src/ai/auto_scaler.py
+index 8101629..57f75f4 100644
+--- a/src/ai/auto_scaler.py
++++ b/src/ai/auto_scaler.py
+@@ -1,29 +1,31 @@
+ import logging
+ import json
+ import os
+ 
++from src.logger import log_event
++
+ def load_module_perf(path="logs/module_performance.json"):
+     if not os.path.exists(path):
+         return {}
+     with open(path, "r") as f:
+         return json.load(f)
+ 
+ def auto_scale_modules(config, perf_path="logs/module_performance.json"):
+     perf = load_module_perf(perf_path)
+     capital_allocation = {}
+     for mod, stats in perf.items():
+         winrate = stats.get("winrate", 0.5)
+         avg_pnl = stats.get("avg_pnl", 0)
+         loss = stats.get("loss", 0)
+         drawdown = stats.get("drawdown", 0)
+         # Example: scale capital up if winrate and PnL are positive, down if not
+         scale = max(0.01, min(1.0, winrate + avg_pnl - drawdown))
+         capital_allocation[mod] = float(config.get("starting_capital", 1000)) * scale
+-    logging.info(f"[AutoScaler] Updated capital allocation: {capital_allocation}")
++    log_event(logging.INFO, f"Updated capital allocation: {capital_allocation}", "auto_scaler")
+     # For prod: update live config, notify orchestrator, or re-balance wallets accordingly
+     return capital_allocation
+ 
+ if __name__ == "__main__":
+     import yaml
+     config = yaml.safe_load(open("config.yaml"))
+     print(auto_scale_modules(config))
+diff --git a/src/ai/edge_pruner.py b/src/ai/edge_pruner.py
+index 7967f3e..484f538 100644
+--- a/src/ai/edge_pruner.py
++++ b/src/ai/edge_pruner.py
+@@ -1,20 +1,29 @@
+ import logging
+ import json
+ import os
+ 
+-def prune_dead_edges(module_perf_log="logs/module_performance.json", threshold=-0.01):
++from src.logger import log_event
++from .strategy_scorer import score_strategy
++
++def prune_dead_edges(config, module_perf_log="logs/module_performance.json"):
++    """Disable edges whose score falls below threshold."""
++    threshold = config.get("ai", {}).get("decay_threshold", -0.01)
++    weights = config.get("ai", {}).get("scoring", {})
+     if not os.path.exists(module_perf_log):
+-        logging.info("[EdgePruner] No performance log found.")
++        log_event(logging.INFO, "No performance log found.", "pruner")
+         return []
+     with open(module_perf_log, "r") as f:
+         perf = json.load(f)
+     killed = []
+     for mod, stats in perf.items():
+-        if stats.get("avg_pnl", 0) < threshold or stats.get("fail_count", 0) > 2:
+-            logging.warning(f"[EdgePruner] Killing module {mod} due to PnL decay or repeated fails.")
++        score = score_strategy(stats, weights)
++        if score < threshold or stats.get("fail_count", 0) > 2:
++            log_event(logging.WARNING, f"Killing module {mod} score {score}", "pruner")
+             killed.append(mod)
+-            # (Optionally) disable in config, move to archive, etc.
+     return killed
+ 
+ if __name__ == "__main__":
+-    print(prune_dead_edges())
++    from src.utils import load_config
++    cfg = load_config("config.yaml")
++    log_event(logging.INFO, "Pruner run standalone", "pruner")
++    print(prune_dead_edges(cfg))
+diff --git a/src/ai/edge_watcher.py b/src/ai/edge_watcher.py
+index 658903a..f91a867 100644
+--- a/src/ai/edge_watcher.py
++++ b/src/ai/edge_watcher.py
+@@ -1,35 +1,37 @@
+ import logging
+ import time
+ from src.ai.alpha_scraper import run_alpha_scraper
+ from src.ai.ai_orchestrator import AIOrchestrator
++from src.logger import log_event
+ 
+ class EdgeWatcher:
+     def __init__(self, orchestrator: AIOrchestrator):
+         self.orchestrator = orchestrator
+ 
+     def run_once(self):
+         # 1. Scrape public feeds for new leaks
+         summary = run_alpha_scraper()
+-        logging.info(f"[EdgeWatcher] Alpha summary:\n{summary}")
++        log_event(logging.INFO, f"Alpha summary:\n{summary}", "edge_watcher")
+ 
+         # 2. Let LLM analyze and propose new module/config/contract upgrades
+         ai_reco = self.orchestrator.openai_analyze_logs(summary)
+-        logging.info(f"[EdgeWatcher][LLM] Edge proposal:\n{ai_reco}")
++        log_event(logging.INFO, f"Edge proposal:\n{ai_reco}", "edge_watcher")
+ 
+         # 3. Human-in-the-loop: notify founder for approval, or auto-prompt orchestrator to test module/edge
+         # (Optional: Plug this into Discord/Telegram alert for approval)
+         print("[EdgeWatcher] New alpha recommendation:")
+         print(ai_reco)
+         # You can add: self.orchestrator.run_module('new_module_from_alpha')
+ 
+     def run_loop(self, interval=900):
+         while True:
+             self.run_once()
+             time.sleep(interval)
+ 
+ if __name__ == "__main__":
+-    import logging
+-    logging.basicConfig(filename="logs/mev_og.log", level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+-    from src.ai.ai_orchestrator import AIOrchestrator
++    from src.utils import load_config
++    from src.logger import setup_logging
++    cfg = load_config("config.yaml")
++    setup_logging(cfg)
+     ew = EdgeWatcher(AIOrchestrator())
+     ew.run_loop()
+diff --git a/src/ai/parameter_mutator.py b/src/ai/parameter_mutator.py
+new file mode 100644
+index 0000000..bd10826
+--- /dev/null
++++ b/src/ai/parameter_mutator.py
+@@ -0,0 +1,37 @@
++import random
++import logging
++from typing import Dict, Any
++
++from src.logger import log_event
++
++
++class ParameterMutator:
++    """Live parameter mutation helper."""
++
++    def __init__(self, config: Dict[str, Any]):
++        self.config = config
++        ai_cfg = config.get("ai", {})
++        self.mutation_freq = ai_cfg.get("mutation_frequency", 10)
++        self.counter = 0
++
++    def maybe_mutate(self, module_name: str) -> bool:
++        """Mutate numeric parameters if frequency threshold reached."""
++        self.counter += 1
++        if self.counter % self.mutation_freq != 0:
++            return False
++        params = (
++            self.config.get("alpha", {})
++            .get("params", {})
++            .get(module_name, {})
++        )
++        mutated = {}
++        for k, v in params.items():
++            if isinstance(v, (int, float)):
++                delta = random.uniform(-0.1, 0.1) * (abs(v) if v != 0 else 1)
++                new_val = type(v)(v + delta)
++                params[k] = new_val
++                mutated[k] = new_val
++        if mutated:
++            log_event(logging.INFO, f"Mutated params {mutated}", f"mutator:{module_name}")
++            return True
++        return False
+diff --git a/src/ai/strategy_scorer.py b/src/ai/strategy_scorer.py
+new file mode 100644
+index 0000000..6f39a47
+--- /dev/null
++++ b/src/ai/strategy_scorer.py
+@@ -0,0 +1,14 @@
++from typing import Dict, Any
++
++
++def score_strategy(stats: Dict[str, Any], weights: Dict[str, float] | None = None) -> float:
++    """Return a meta-edge score for the given performance stats."""
++    if weights is None:
++        weights = {}
++    win_w = weights.get("winrate_weight", 0.5)
++    pnl_w = weights.get("pnl_weight", 0.5)
++    fail_w = weights.get("fail_weight", 0.0)
++    winrate = stats.get("winrate", 0)
++    pnl = stats.get("avg_pnl", 0)
++    fails = stats.get("fail_count", 0)
++    return win_w * winrate + pnl_w * pnl - fail_w * fails
+diff --git a/src/logger.py b/src/logger.py
+new file mode 100644
+index 0000000..e2649f6
+--- /dev/null
++++ b/src/logger.py
+@@ -0,0 +1,31 @@
++import logging
++import json
++import hashlib
++import os
++import time
++
++CONFIG_HASH = "unknown"
++
++
++def setup_logging(config, log_file="logs/mev_og.log"):
++    """Initialize logging with UTC timestamps and config hash."""
++    global CONFIG_HASH
++    os.makedirs(os.path.dirname(log_file), exist_ok=True)
++    config_str = json.dumps(config, sort_keys=True)
++    CONFIG_HASH = hashlib.sha256(config_str.encode()).hexdigest()[:8]
++    logging.basicConfig(
++        filename=log_file,
++        level=logging.INFO,
++        format="%(asctime)sZ %(levelname)s %(message)s",
++    )
++    logging.Formatter.converter = time.gmtime
++    logging.info(f"[Logger] Initialized with config hash {CONFIG_HASH}")
++
++
++def log_event(level, message, context=""):
++    prefix = f"[CFG:{CONFIG_HASH}]"
++    if context:
++        msg = f"{prefix} [{context}] {message}"
++    else:
++        msg = f"{prefix} {message}"
++    logging.log(level, msg)
+diff --git a/tests/test_ai_mutation_and_pruning.py b/tests/test_ai_mutation_and_pruning.py
+new file mode 100644
+index 0000000..86be919
+--- /dev/null
++++ b/tests/test_ai_mutation_and_pruning.py
+@@ -0,0 +1,51 @@
++import json
++import hashlib
++
++from src.ai.parameter_mutator import ParameterMutator
++from src.ai.edge_pruner import prune_dead_edges
++from src.ai.strategy_scorer import score_strategy
++from src.logger import setup_logging
++from src.kill_switch import KillSwitch
++
++
++def base_config():
++    return {
++        "alpha": {"params": {"mod": {"x": 1.0}}},
++        "ai": {
++            "mutation_frequency": 1,
++            "decay_threshold": -0.01,
++            "scoring": {"winrate_weight": 0.5, "pnl_weight": 0.5, "fail_weight": 0.1},
++        },
++        "risk": {"max_drawdown_pct": 5, "max_loss_usd": 200},
++        "kill_switch_enabled": True,
++    }
++
++
++def test_parameter_mutation(tmp_path):
++    cfg = base_config()
++    log_file = tmp_path / "log.log"
++    expected_hash = hashlib.sha256(json.dumps(cfg, sort_keys=True).encode()).hexdigest()[:8]
++    setup_logging(cfg, str(log_file))
++    mut = ParameterMutator(cfg)
++    assert mut.maybe_mutate("mod")
++    assert cfg["alpha"]["params"]["mod"]["x"] != 1.0
++    contents = log_file.read_text()
++    assert expected_hash in contents
++
++
++def test_pruning_and_kill_switch(tmp_path):
++    cfg = base_config()
++    perf = {"bad": {"winrate": 0.2, "avg_pnl": -0.05, "fail_count": 3}}
++    perf_file = tmp_path / "perf.json"
++    perf_file.write_text(json.dumps(perf))
++    ks = KillSwitch(cfg)
++    killed = prune_dead_edges(cfg, str(perf_file))
++    assert "bad" in killed
++    assert ks.is_enabled()
++
++
++def test_strategy_scoring():
++    stats = {"winrate": 0.6, "avg_pnl": 0.02, "fail_count": 1}
++    score = score_strategy(stats, {"winrate_weight": 0.5, "pnl_weight": 0.5, "fail_weight": 0.1})
++    assert score > 0
++
+ 
+EOF
+)

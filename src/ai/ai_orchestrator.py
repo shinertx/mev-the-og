@@ -4,6 +4,7 @@ import importlib
 import openai
 import os
 from src.utils import load_config
+from src.logger import setup_logging, log_event
 
 OPENAI_MODEL = "gpt-4o"  # Or use "gpt-3.5-turbo" if needed
 
@@ -11,6 +12,7 @@ class AIOrchestrator:
     def __init__(self, config_path="config.yaml"):
         self.config_path = config_path
         self.config = load_config(config_path)
+        setup_logging(self.config)
         openai.api_key = os.environ.get("OPENAI_API_KEY")
         self.alpha_modules = [
             "cross_chain_arb",
@@ -26,17 +28,18 @@ class AIOrchestrator:
 
     def run_module(self, module_name, mode="test"):
         try:
-            logging.info(f"[AIOrchestrator] Running {module_name} in {mode} mode")
+            log_event(logging.INFO, f"Running {module_name} in {mode} mode", "orchestrator")
             mod = importlib.import_module(f"src.alpha.{module_name}")
             run_func = getattr(mod, f"run_{module_name}", None)
             if run_func:
                 run_func(self.config)
                 self.module_results[module_name] = "success"
+                log_event(logging.INFO, f"Module {module_name} success", "orchestrator")
             else:
-                logging.warning(f"[AIOrchestrator] No run_{module_name} function in {module_name}.py")
+                log_event(logging.WARNING, f"No run_{module_name} function in {module_name}.py", "orchestrator")
                 self.module_results[module_name] = "missing_run_func"
         except Exception as e:
-            logging.warning(f"[AIOrchestrator] Module {module_name} failed: {e}")
+            log_event(logging.WARNING, f"Module {module_name} failed: {e}", "orchestrator")
             self.module_results[module_name] = f"fail: {e}"
 
     def get_logs(self, log_path="logs/mev_og.log", n=100):
@@ -69,7 +72,7 @@ class AIOrchestrator:
             return f"[AIOrchestrator] OpenAI analysis failed: {e}"
 
     def main_loop(self, interval_sec=600):
-        logging.info("[AIOrchestrator] Starting perpetual alpha coordination loop.")
+        log_event(logging.INFO, "Starting perpetual alpha coordination loop.", "orchestrator")
         while True:
             for module in self.alpha_modules:
                 self.run_module(module, mode=self.config.get("mode", "test"))
@@ -77,7 +80,7 @@ class AIOrchestrator:
 
             logs = self.get_logs()
             ai_recommendations = self.openai_analyze_logs(logs)
-            logging.info(f"[AIOrchestrator][OpenAI] Alpha/edge recommendations:\n{ai_recommendations}")
+            log_event(logging.INFO, f"OpenAI recommendations:\n{ai_recommendations}", "orchestrator")
 
             # Optional: Auto-update config/params based on LLM suggestions (require human-in-the-loop for prod safety)
             if "PROMOTE TO LIVE" in ai_recommendations and self.config.get("mode") != "live":
@@ -88,7 +91,5 @@ class AIOrchestrator:
             time.sleep(interval_sec)
 
 if __name__ == "__main__":
-    import sys
-    logging.basicConfig(filename="logs/mev_og.log", level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     orchestrator = AIOrchestrator()
     orchestrator.main_loop()

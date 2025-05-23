@@ -1,0 +1,667 @@
+ (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
+diff --git a/README.md b/README.md
+index 9c26e0c..43b90c6 100644
+--- a/README.md
++++ b/README.md
+@@ -6,25 +6,48 @@ Build and operate the world’s most aggressive, adaptive, AI/quant-driven crypt
+ ## Quickstart
+ 
+ 1. Install dependencies:  
+    `pip install -r requirements.txt`
+ 
+ 2. Fill in `config.yaml` (see `.env.example` for env vars).
+ 
+ 3. Run any alpha module:  
+    - `python main.py --mode test --alpha cross_chain`
+    - `python main.py --mode test --alpha mev_share`
+    - (or try any in `src/alpha/`)
+ 
+ 4. Logs are in `logs/mev_og.log`.
+ 
+ 5. See the dashboard:  
+    `python main.py --dashboard`
+ 
+ ## Structure
+ 
+ - `src/alpha/` – All advanced MEV modules
+ - `src/` – Core bot, risk, kill switch, utils, dashboard, notifier
+ - `tests/` – Full test suite
+ - `logs/` – Log output
+ - `Dockerfile` – Run anywhere
+ - `run.sh` – Example launch script
++
++## Configuration & Secret Management
++
++All secrets must live in `.env` only. Copy `.env.example` to `.env` and fill values.
++`config.yaml` holds non-secret parameters and is strictly validated at startup.
++
++To rotate secrets:
++1. Run `scripts/rotate_secrets.py` to back up the current `.env`.
++2. Edit the `.env` with new values.
++3. Restart the bot.
++
++If the bot halts due to config or secret issues:
++1. Check logs for `ConfigMonitor` messages.
++2. Restore the last known-good `.env` or `config.yaml` from backups.
++3. Fix any validation errors and restart.
++
++The `ConfigMonitor` halts trading if `.env` or `config.yaml` change while running.
++Notifications are sent via all configured channels when this occurs.
++
++### Troubleshooting
++- Ensure `.env` syntax is `KEY=value` per line with no quotes.
++- Missing required fields will raise a `RuntimeError` during startup.
++- After resolving issues, restart the bot to resume operation.
+diff --git a/scripts/rotate_secrets.py b/scripts/rotate_secrets.py
+new file mode 100755
+index 0000000..3f1e5fb
+--- /dev/null
++++ b/scripts/rotate_secrets.py
+@@ -0,0 +1,24 @@
++#!/usr/bin/env python
++"""Utility to rotate bot secrets safely."""
++
++import os
++from datetime import datetime
++from pathlib import Path
++import shutil
++
++ENV_FILE = ".env"
++
++
++def main():
++    if not Path(ENV_FILE).exists():
++        print("No .env file found.")
++        return
++    ts = datetime.utcnow().strftime("%Y%m%d%H%M%S")
++    backup = Path(f"{ENV_FILE}.{ts}.bak")
++    shutil.copy(ENV_FILE, backup)
++    print(f"Backup created: {backup}")
++    print("Edit the .env file with new secrets and restart the bot.")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/src/ai/ai_orchestrator.py b/src/ai/ai_orchestrator.py
+index 0fbe90e..590073d 100644
+--- a/src/ai/ai_orchestrator.py
++++ b/src/ai/ai_orchestrator.py
+@@ -1,39 +1,41 @@
+ import time
+ import logging
+ import importlib
+ import openai
+ import os
+ from src.utils import load_config
++from src.safety.config_monitor import ConfigMonitor
+ 
+ OPENAI_MODEL = "gpt-4o"  # Or use "gpt-3.5-turbo" if needed
+ 
+ class AIOrchestrator:
+     def __init__(self, config_path="config.yaml"):
+         self.config_path = config_path
+         self.config = load_config(config_path)
+         openai.api_key = os.environ.get("OPENAI_API_KEY")
++        self.monitor = ConfigMonitor(config_path, ".env", notifier_cfg=self.config.get("notifier", {}))
+         self.alpha_modules = [
+             "cross_chain_arb",
+             "l2_sandwich",
+             "bridge_games",
+             "mev_share",
+             "flash_loan",
+             "liquidation",
+             "nftfi",
+             "edge_bridge_arb"
+         ]
+         self.module_results = {}
+ 
+     def run_module(self, module_name, mode="test"):
+         try:
+             logging.info(f"[AIOrchestrator] Running {module_name} in {mode} mode")
+             mod = importlib.import_module(f"src.alpha.{module_name}")
+             run_func = getattr(mod, f"run_{module_name}", None)
+             if run_func:
+                 run_func(self.config)
+                 self.module_results[module_name] = "success"
+             else:
+                 logging.warning(f"[AIOrchestrator] No run_{module_name} function in {module_name}.py")
+                 self.module_results[module_name] = "missing_run_func"
+         except Exception as e:
+             logging.warning(f"[AIOrchestrator] Module {module_name} failed: {e}")
+@@ -49,46 +51,47 @@ class AIOrchestrator:
+ 
+     def openai_analyze_logs(self, logs):
+         prompt = (
+             "You are a world-class adversarial DeFi/MEV quant. "
+             "Given these bot logs, identify any new arbitrage/MEV opportunities, vulnerabilities, and suggest new edges or parameter tweaks "
+             "that would maximize edge or reduce risk. Output only actionable recommendations and code/config edits if relevant.\n\n"
+             "LOGS:\n" + logs
+         )
+         try:
+             resp = openai.ChatCompletion.create(
+                 model=OPENAI_MODEL,
+                 messages=[
+                     {"role": "system", "content": "You are a world-class MEV quant research agent."},
+                     {"role": "user", "content": prompt}
+                 ],
+                 temperature=0.2,
+                 max_tokens=700,
+             )
+             return resp["choices"][0]["message"]["content"]
+         except Exception as e:
+             return f"[AIOrchestrator] OpenAI analysis failed: {e}"
+ 
+     def main_loop(self, interval_sec=600):
+         logging.info("[AIOrchestrator] Starting perpetual alpha coordination loop.")
+         while True:
++            self.monitor.check()
+             for module in self.alpha_modules:
+                 self.run_module(module, mode=self.config.get("mode", "test"))
+                 time.sleep(3)  # Stagger modules
+ 
+             logs = self.get_logs()
+             ai_recommendations = self.openai_analyze_logs(logs)
+             logging.info(f"[AIOrchestrator][OpenAI] Alpha/edge recommendations:\n{ai_recommendations}")
+ 
+             # Optional: Auto-update config/params based on LLM suggestions (require human-in-the-loop for prod safety)
+             if "PROMOTE TO LIVE" in ai_recommendations and self.config.get("mode") != "live":
+                 logging.info("[AIOrchestrator] OpenAI recommends switching to live mode! (manual approval required)")
+                 # (Optional) Hook for notification/approval here
+ 
+             # Sleep until next cycle
+             time.sleep(interval_sec)
+ 
+ if __name__ == "__main__":
+     import sys
+     logging.basicConfig(filename="logs/mev_og.log", level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+     orchestrator = AIOrchestrator()
+     orchestrator.main_loop()
+diff --git a/src/alpha/cross_chain_arb.py b/src/alpha/cross_chain_arb.py
+index 30c6af6..df036b6 100644
+--- a/src/alpha/cross_chain_arb.py
++++ b/src/alpha/cross_chain_arb.py
+@@ -1,35 +1,36 @@
+ import logging
+ import os
+ import time
+ import traceback
+ from decimal import Decimal
+ from web3 import Web3
+ from eth_account import Account
+-from src.utils import load_config, notify_critical
++from src.utils import load_config
+ from src.risk_manager import RiskManager
+ from src.kill_switch import KillSwitch
++from src.safety.config_monitor import ConfigMonitor
+ 
+ # === Signer Abstraction ===
+ class SignerService:
+     """Signer abstraction: for local dev uses env var, for prod can be swapped to hardware/KMS."""
+     def __init__(self):
+         key = os.environ.get("PRIVATE_KEY")
+         if not key:
+             raise RuntimeError("PRIVATE_KEY not set in environment.")
+         self.account = Account.from_key(key)
+         self.private_key = key
+ 
+     def sign(self, tx_dict):
+         return Account.sign_transaction(tx_dict, self.private_key)
+ 
+     def get_address(self):
+         return self.account.address
+ 
+ # === Simulated Bridge ===
+ class SimulatedBridge:
+     """Simulates cross-chain transfer. Replace with real integration for prod."""
+     def __init__(self, fee_bps=8, min_delay=10, max_delay=25):
+         self.fee_bps = fee_bps
+         self.min_delay = min_delay
+         self.max_delay = max_delay
+ 
+@@ -70,50 +71,51 @@ class TransactionManager:
+         signed = self.signer.sign(tx_dict)
+         tx_hash = self.web3.eth.send_raw_transaction(signed.rawTransaction)
+         logging.info(f"[TxManager] Sent tx {tx_hash.hex()}, waiting for confirmation...")
+         try:
+             receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+             if receipt.status == 1:
+                 logging.info(f"[TxManager] Tx {tx_hash.hex()} confirmed in block {receipt.blockNumber}")
+                 return True, tx_hash, receipt.gasUsed * tx_dict['gasPrice'] / 1e18  # returns gas in ETH
+             else:
+                 logging.error(f"[TxManager] Tx reverted: {tx_hash.hex()}")
+                 return False, tx_hash, None
+         except Exception as e:
+             logging.error(f"[TxManager] Tx receipt error: {e}")
+             return False, tx_hash, None
+ 
+ # === Main Cross-Chain Arb ===
+ class CrossChainArb:
+     def __init__(self, config_path="config.yaml"):
+         self.config = load_config(config_path)
+         self.signer_service = SignerService()
+         self.wallet = self.signer_service.get_address()
+         self.web3_mainnet = Web3(Web3.HTTPProvider(self.config["rpc_urls"]["mainnet"]))
+         self.web3_l2 = Web3(Web3.HTTPProvider(self.config["rpc_urls"]["arbitrum"]))
+         self.risk = RiskManager(self.config)
+         self.kill = KillSwitch(self.config)
++        self.monitor = ConfigMonitor(config_path, ".env", kill_switch=self.kill, notifier_cfg=self.config.get("notifier", {}))
+         self.live_mode = self.config.get("mode", "test") == "live"
+         self.bridge = SimulatedBridge(fee_bps=self.config.get("bridge_fee_bps", 8))
+         # Routers must be present in config
+         self.mainnet_router = self.web3_mainnet.eth.contract(
+             address=self.config["uniswap_router_address"]["mainnet"],
+             abi=self.config["uniswap_router_abi"])
+         self.l2_router = self.web3_l2.eth.contract(
+             address=self.config["uniswap_router_address"]["arbitrum"],
+             abi=self.config["uniswap_router_abi"])
+         # Transaction Managers
+         self.txm_mainnet = TransactionManager(self.web3_mainnet, self.wallet, self.signer_service)
+         self.txm_l2 = TransactionManager(self.web3_l2, self.wallet, self.signer_service)
+ 
+     def get_price(self, web3, router, token_addr, amount_in_wei):
+         try:
+             out = router.functions.getAmountsOut(amount_in_wei, [
+                 token_addr, self.config["usdc_address"]
+             ]).call()
+             return Decimal(out[-1]) / (10 ** self.config["usdc_decimals"])
+         except Exception as e:
+             logging.warning(f"[CrossChainArb] get_price failed: {e}")
+             return None
+ 
+     def detect_opportunity(self):
+         eth_token = self.config["eth_address"]
+@@ -139,94 +141,95 @@ class CrossChainArb:
+             gas_cost_main_usd = gas_mainnet * gas_price_main * float(price_mainnet) / 1e9
+         except:
+             gas_cost_main_usd = 2
+         try:
+             gas_l2 = self.web3_l2.eth.estimate_gas(dummy_tx)
+             gas_price_l2 = self.web3_l2.eth.gas_price / 1e9
+             gas_cost_l2_usd = gas_l2 * gas_price_l2 * float(price_l2) / 1e9
+         except:
+             gas_cost_l2_usd = 0.2
+         bridge_fee = (trade_amount * bridge_fee_bps) / Decimal(10000) * price_mainnet
+         net_profit = gross_profit - Decimal(gas_cost_main_usd) - Decimal(gas_cost_l2_usd) - bridge_fee
+         logging.info(f"[CrossChainArb] Mainnet: {price_mainnet}, L2: {price_l2}, Gross: {gross_profit:.2f}, Net: {net_profit:.2f}")
+         if net_profit > Decimal(self.config.get("min_profit_usd", 3)):
+             return {
+                 "buy_chain": "mainnet" if price_mainnet < price_l2 else "arbitrum",
+                 "sell_chain": "arbitrum" if price_mainnet < price_l2 else "mainnet",
+                 "trade_amount_eth": float(trade_amount),
+                 "net_profit_usd": float(net_profit),
+                 "price_mainnet": float(price_mainnet),
+                 "price_l2": float(price_l2)
+             }
+         return None
+ 
+     def execute_arb(self, opp):
+         if not self.risk.check_trade(opp["net_profit_usd"]):
+-            notify_critical("[RISK] Trade blocked by risk manager")
++            self.kill.trigger("risk manager blocked trade")
+             return False
+         if not self.kill.is_enabled():
+-            notify_critical("[KILL SWITCH] Not enabled, aborting")
++            self.kill.trigger("kill switch disabled")
+             return False
+         try:
+             eth_amt = Decimal(opp["trade_amount_eth"])
+             in_wei = Web3.to_wei(eth_amt, "ether")
+             deadline = int(time.time()) + 180
+             in_token = self.config["eth_address"]
+             out_token = self.config["usdc_address"]
+ 
+             # Step 1: Sell ETH for USDC on the more expensive chain
+             if opp["sell_chain"] == "mainnet":
+                 router = self.mainnet_router
+                 txm = self.txm_mainnet
+                 web3 = self.web3_mainnet
+                 price = opp["price_mainnet"]
+             else:
+                 router = self.l2_router
+                 txm = self.txm_l2
+                 web3 = self.web3_l2
+                 price = opp["price_l2"]
+ 
+             amount_out_min = Decimal(price) * eth_amt * Decimal(1 - self.config.get("slippage_bps", 20) / 10000)
+             amount_out_min_wei = int(amount_out_min * (10 ** self.config["usdc_decimals"]))
+ 
+             if not self.live_mode:
+                 logging.info(f"[SIM][Arb] Would sell {eth_amt} ETH for min {amount_out_min_wei / (10**self.config['usdc_decimals']):.2f} USDC on {opp['sell_chain']}")
+                 net_after_bridge, _ = self.bridge.bridge(eth_amt)
+                 logging.info(f"[SIM][Arb] Would now buy {net_after_bridge:.6f} ETH back on {opp['buy_chain']}")
+                 self.risk.update_drawdown(opp["net_profit_usd"])
+                 self.kill.update_pnl(opp["net_profit_usd"])
+                 return True
+ 
+             # Build, sign, send, monitor
+             tx = txm.build_swap_tx(router, in_wei, in_token, out_token, amount_out_min_wei, deadline)
+             ok, tx_hash, gas_used_eth = txm.send_and_monitor(tx)
+             if not ok:
+-                notify_critical(f"[Arb] Sell leg failed on {opp['sell_chain']}.")
++                self.kill.trigger("sell leg failed")
+                 return False
+ 
+             # Step 2: Bridge ETH to the other chain
+             net_after_bridge, _ = self.bridge.bridge(eth_amt)
+             # (In reality, you'd wait for bridge confirmation before step 3)
+ 
+             # Step 3: Buy ETH on the cheaper chain (reverse swap)
+             # For simplicity, simulate using USDC to buy back ETH (could be a real swapExactTokensForETH)
+             # This closes the arb loop, returning to starting asset.
+             logging.info(f"[Arb] Now buying {net_after_bridge:.6f} ETH on {opp['buy_chain']}")
+             # (Here you would build/send a swap on the opp['buy_chain'] using txm_mainnet or txm_l2)
+ 
+             # All steps succeeded
+             self.risk.update_drawdown(opp["net_profit_usd"])
+             self.kill.update_pnl(opp["net_profit_usd"])
+             return True
+         except Exception as e:
+             logging.critical(f"[CrossChainArb] Arb execution error: {traceback.format_exc()}")
+             return False
+ 
+     def run(self):
+         logging.info("[CrossChainArb] Starting cross-chain arb loop (full live mode)")
+         while self.kill.is_enabled():
++            self.monitor.check()
+             opp = self.detect_opportunity()
+             if opp:
+                 success = self.execute_arb(opp)
+                 if not success:
+                     logging.warning("[CrossChainArb] Arb execution failed, see logs")
+             time.sleep(self.config.get("poll_interval_sec", 12))
+diff --git a/src/core/config_manager.py b/src/core/config_manager.py
+index 76549ad..be21f49 100644
+--- a/src/core/config_manager.py
++++ b/src/core/config_manager.py
+@@ -1,33 +1,38 @@
+ import os
+ import yaml
+-from dotenv import load_dotenv
+ from typing import Optional, Dict
+ from pydantic import BaseModel, Field, ValidationError, RootModel
++from .env_manager import load_env_file, load_env_config
+ 
+-# Load .env if present
+-load_dotenv()
++# Load and validate .env if present
++load_env_file()
++_ENV_CFG = None
++try:
++    _ENV_CFG = load_env_config()
++except RuntimeError as e:
++    raise RuntimeError(f"Environment validation failed: {e}")
+ 
+ # --- Pydantic Models matching your config.yaml ---
+ 
+ class NotifierConfig(BaseModel):
+     telegram_token: Optional[str] = None
+     telegram_chat_id: Optional[str] = None
+     email: Optional[str] = None
+ 
+ class RiskConfig(BaseModel):
+     max_drawdown_pct: float = Field(gt=0, lt=100)
+     max_loss_usd: float = Field(gt=0)
+ 
+ class ContractsConfig(RootModel[Dict[str, str]]):
+     pass
+ 
+ class RPCUrlsConfig(RootModel[Dict[str, str]]):
+     pass
+ 
+ class WSSUrlsConfig(RootModel[Dict[str, Optional[str]]]):
+     pass
+ 
+ class AppConfig(BaseModel):
+     network: str
+     wallet_address: str
+     uniswap_wallet_address: Optional[str] = None
+diff --git a/src/core/env_manager.py b/src/core/env_manager.py
+new file mode 100644
+index 0000000..77479fb
+--- /dev/null
++++ b/src/core/env_manager.py
+@@ -0,0 +1,39 @@
++import os
++from typing import Dict
++from pydantic import BaseModel, ValidationError
++
++class EnvConfig(BaseModel):
++    TELEGRAM_BOT_TOKEN: str | None = None
++    TELEGRAM_CHAT_ID: str | None = None
++    INFURA_PROJECT_ID: str | None = None
++    OPENAI_API_KEY: str | None = None
++    KMS_API_KEY: str | None = None
++    KMS_KEY_ID: str | None = None
++    LOCAL_SIGNER_KEY_PATH: str | None = None
++
++    model_config = {"extra": "ignore"}
++
++
++def load_env_file(path: str = ".env") -> Dict[str, str]:
++    if not os.path.exists(path):
++        return {}
++    data: Dict[str, str] = {}
++    with open(path, "r") as f:
++        for line in f:
++            line = line.strip()
++            if not line or line.startswith("#"):
++                continue
++            if "=" not in line:
++                raise RuntimeError(f"Malformed env line: {line}")
++            k, v = line.split("=", 1)
++            data[k] = v
++            os.environ.setdefault(k, v)
++    return data
++
++
++def load_env_config(path: str = ".env") -> EnvConfig:
++    raw = load_env_file(path)
++    try:
++        return EnvConfig(**raw)
++    except ValidationError as e:
++        raise RuntimeError(f"Env validation failed:\n{e}")
+diff --git a/src/kill_switch.py b/src/kill_switch.py
+index bb63879..93046a0 100644
+--- a/src/kill_switch.py
++++ b/src/kill_switch.py
+@@ -1,27 +1,36 @@
+ import logging
++from src.notifier import send_telegram, send_email
+ 
+ class KillSwitch:
+     def __init__(self, config):
+         self.enabled = config.get("kill_switch_enabled", True)
+         self.max_drawdown_pct = config.get("risk", {}).get("max_drawdown_pct", 5)
+         self.max_loss_usd = config.get("risk", {}).get("max_loss_usd", 200)
+         self.trading_enabled = True
+         self.pnl_history = []
++        self.notifier_cfg = config.get("notifier", {})
+ 
+     def update_pnl(self, pnl_usd):
+         self.pnl_history.append(pnl_usd)
+         if len(self.pnl_history) > 100:
+             self.pnl_history = self.pnl_history[-100:]
+         self._check_risk()
+ 
+     def _check_risk(self):
+         if not self.enabled:
+             return
+         total_pnl = sum(self.pnl_history)
+         min_pnl = min(self.pnl_history) if self.pnl_history else 0
+         if abs(min_pnl) > self.max_loss_usd or (total_pnl < 0 and abs(total_pnl) > self.max_loss_usd):
+-            self.trading_enabled = False
+-            logging.critical("[KILL SWITCH] Triggered: max loss exceeded. Trading disabled.")
++            self.trigger("max loss exceeded")
++
++    def trigger(self, reason: str):
++        self.trading_enabled = False
++        logging.critical(f"[KILL SWITCH] Triggered: {reason}. Trading disabled.")
++        send_telegram(f"KILL SWITCH: {reason}", self.notifier_cfg.get("telegram_token"), self.notifier_cfg.get("telegram_chat_id"))
++        email = self.notifier_cfg.get("email")
++        if email:
++            send_email(f"KILL SWITCH: {reason}", email)
+ 
+     def is_enabled(self):
+         return self.trading_enabled
+diff --git a/src/mev_bot.py b/src/mev_bot.py
+index e6396ee..5a10198 100644
+--- a/src/mev_bot.py
++++ b/src/mev_bot.py
+@@ -1,37 +1,40 @@
+ import time
+ from web3 import Web3
+ from .utils import load_config
+ from .risk_manager import RiskManager
+ from .kill_switch import KillSwitch
+ from .notifier import send_telegram
++from .safety.config_monitor import ConfigMonitor
+ 
+ class MEVBot:
+     def __init__(self, config_path="config.yaml"):
+         self.config = load_config(config_path)
+         self.network = self.config.get("network")
+         self.mode = self.config.get("mode")
+         self.alchemy_api_key = self.config.get("alchemy_api_key")
+         self.web3 = Web3(Web3.HTTPProvider(f"https://eth-{self.network}.g.alchemy.com/v2/{self.alchemy_api_key}"))
+         self.wallet = self.config.get("wallet_address")
+         self.risk = RiskManager(self.config)
+         self.kill = KillSwitch(self.config)
++        self.monitor = ConfigMonitor(config_path, ".env", kill_switch=self.kill, notifier_cfg=self.config.get("notifier", {}))
+         print(f"[MEVBot] Initialized in {self.mode.upper()} mode on {self.network}")
+ 
+     def run(self):
+         print("[MEVBot] Running main bot loop (demo mode)...")
+         latest = self.web3.eth.block_number
+         print(f"[MEVBot] Latest block: {latest}")
+ 
+         # DEMO: Update risk/kill logic (stub)
+         fake_pnl = 0  # replace with real PnL calc as needed
+         self.risk.update_drawdown(fake_pnl)
+         self.kill.update_pnl(fake_pnl)
++        self.monitor.check()
+         if not self.kill.is_enabled():
+             print("[MEVBot] Kill switch triggered. Exiting.")
+             send_telegram("KILL SWITCH: Trading disabled!", self.config['notifier'].get('telegram_token',''), self.config['notifier'].get('telegram_chat_id',''))
+             return
+         # ... extend with further strategies or module hooks
+ 
+ if __name__ == "__main__":
+     bot = MEVBot()
+     bot.run()
+diff --git a/src/safety/config_monitor.py b/src/safety/config_monitor.py
+new file mode 100644
+index 0000000..96230b8
+--- /dev/null
++++ b/src/safety/config_monitor.py
+@@ -0,0 +1,47 @@
++import hashlib
++import logging
++import os
++from typing import Optional
++
++from src.notifier import send_telegram, send_email
++
++
++def _hash_file(path: str) -> Optional[str]:
++    if not os.path.exists(path):
++        return None
++    h = hashlib.sha256()
++    with open(path, "rb") as f:
++        for chunk in iter(lambda: f.read(8192), b""):
++            h.update(chunk)
++    return h.hexdigest()
++
++
++class ConfigMonitor:
++    """Watches config.yaml and .env for changes."""
++
++    def __init__(self, config_path: str, env_path: str, kill_switch=None, notifier_cfg: Optional[dict] = None):
++        self.config_path = config_path
++        self.env_path = env_path
++        self.kill_switch = kill_switch
++        self.notifier_cfg = notifier_cfg or {}
++        self.config_hash = _hash_file(config_path)
++        self.env_hash = _hash_file(env_path)
++
++    def check(self) -> bool:
++        changed = False
++        new_cfg = _hash_file(self.config_path)
++        new_env = _hash_file(self.env_path)
++        if new_cfg != self.config_hash or new_env != self.env_hash:
++            changed = True
++            self.config_hash = new_cfg
++            self.env_hash = new_env
++            logging.critical("[ConfigMonitor] Configuration or secret changed!")
++            if self.kill_switch:
++                self.kill_switch.trigger("CONFIG CHANGE DETECTED")
++            token = self.notifier_cfg.get("telegram_token")
++            chat = self.notifier_cfg.get("telegram_chat_id")
++            email = self.notifier_cfg.get("email")
++            send_telegram("CONFIG CHANGED - TRADING HALTED", token, chat)
++            if email:
++                send_email("CONFIG CHANGED - TRADING HALTED", email)
++        return changed
+diff --git a/src/utils.py b/src/utils.py
+index 5577185..6668c77 100644
+--- a/src/utils.py
++++ b/src/utils.py
+@@ -1,15 +1,9 @@
+-import yaml
+ import os
+-from dotenv import load_dotenv
++from .core.config_manager import load_app_config
++from .core.env_manager import load_env_config, load_env_file
+ 
+-def load_config(path="config.yaml"):
+-    if os.path.exists('.env'):
+-        load_dotenv('.env')
+-    with open(path, "r") as f:
+-        config = yaml.safe_load(f)
+-    # Override with env vars if present
+-    for key in ["alchemy_api_key", "private_key", "wallet_address"]:
+-        env_val = os.environ.get(key.upper())
+-        if env_val:
+-            config[key] = env_val
+-    return config
++def load_config(path: str = "config.yaml"):
++    load_env_file()
++    load_env_config()
++    cfg = load_app_config(path)
++    return cfg.model_dump()
+diff --git a/tests/test_config_security.py b/tests/test_config_security.py
+new file mode 100644
+index 0000000..9be4628
+--- /dev/null
++++ b/tests/test_config_security.py
+@@ -0,0 +1,28 @@
++import os
++import pytest
++from src.core.env_manager import load_env_config, load_env_file
++from src.safety.config_monitor import ConfigMonitor
++from src.kill_switch import KillSwitch
++
++
++def test_env_validation_error(tmp_path):
++    env_file = tmp_path / ".env"
++    env_file.write_text("BADLINE")
++    with pytest.raises(RuntimeError):
++        load_env_config(str(env_file))
++
++
++def test_runtime_config_tamper(monkeypatch, tmp_path):
++    cfg = tmp_path / "config.yaml"
++    cfg.write_text("network: sepolia\nmode: test\nrisk:\n  max_drawdown_pct: 5\n  max_loss_usd: 100\n")
++    envf = tmp_path / ".env"
++    envf.write_text("TELEGRAM_BOT_TOKEN=x\nTELEGRAM_CHAT_ID=y\n")
++    ks = KillSwitch({'risk': {'max_drawdown_pct':5, 'max_loss_usd':100}, 'notifier': {'telegram_token':'x','telegram_chat_id':'y'}})
++    messages = []
++    monkeypatch.setattr('src.notifier.send_telegram', lambda m,t,c: messages.append(m))
++    monitor = ConfigMonitor(str(cfg), str(envf), kill_switch=ks, notifier_cfg={'telegram_token':'x','telegram_chat_id':'y'})
++    cfg.write_text("tampered: true")
++    changed = monitor.check()
++    assert changed
++    assert not ks.is_enabled()
++    assert messages
+ 
+EOF
+)

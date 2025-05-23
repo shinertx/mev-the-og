@@ -4,6 +4,8 @@ import os
 import time
 import openai
 
+from src.logger import log_event
+
 # If using OpenAI for summarization
 openai.api_key = os.environ.get("OPENAI_API_KEY")
 OPENAI_MODEL = "gpt-4o"
@@ -17,7 +19,7 @@ def fetch_twitter_feed(keywords):
             if resp.status_code == 200:
                 tweets.append(resp.text[:1500])  # For demo, real version would parse HTML for tweet text
         except Exception as e:
-            logging.warning(f"[AlphaScraper] Twitter fetch fail: {e}")
+            log_event(logging.WARNING, f"Twitter fetch fail: {e}", "alpha_scraper")
     return "\n\n".join(tweets)
 
 def fetch_github_feed(repos):
@@ -30,7 +32,7 @@ def fetch_github_feed(repos):
                     msg = commit['commit']['message']
                     commits.append(f"{repo}: {msg}")
         except Exception as e:
-            logging.warning(f"[AlphaScraper] Github fetch fail: {e}")
+            log_event(logging.WARNING, f"Github fetch fail: {e}", "alpha_scraper")
     return "\n\n".join(commits)
 
 def fetch_dune_dashboard(dashboard_id):
@@ -76,9 +78,13 @@ def run_alpha_scraper():
 
     combined_feed = "\n\n".join(feed)
     summary = summarize_alpha(combined_feed)
-    logging.info(f"[AlphaScraper][Summary] {summary}")
+    log_event(logging.INFO, f"Summary {summary}", "alpha_scraper")
     return summary
 
 if __name__ == "__main__":
-    logging.basicConfig(filename="logs/mev_og.log", level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    from src.utils import load_config
+    from src.logger import setup_logging
+    cfg = load_config("config.yaml")
+    setup_logging(cfg)
+    log_event(logging.INFO, "Alpha scraper standalone run", "alpha_scraper")
     print(run_alpha_scraper())

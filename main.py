@@ -31,11 +31,13 @@ def main():
 
     # Setup logging
     os.makedirs('logs', exist_ok=True)
-    logging.basicConfig(filename='logs/mev_og.log', level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
-
+    from src.logger import setup_logging
     config = load_config("config.yaml")
     if args.mode:
         config['mode'] = args.mode
+    setup_logging(config)
+
+    # config already loaded above
 
     if args.dashboard:
         from src.dashboard import launch_dashboard

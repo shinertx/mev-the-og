@@ -2,6 +2,8 @@ import logging
 import json
 import os
 
+from src.logger import log_event
+
 def load_module_perf(path="logs/module_performance.json"):
     if not os.path.exists(path):
         return {}
@@ -19,7 +21,7 @@ def auto_scale_modules(config, perf_path="logs/module_performance.json"):
         # Example: scale capital up if winrate and PnL are positive, down if not
         scale = max(0.01, min(1.0, winrate + avg_pnl - drawdown))
         capital_allocation[mod] = float(config.get("starting_capital", 1000)) * scale
-    logging.info(f"[AutoScaler] Updated capital allocation: {capital_allocation}")
+    log_event(logging.INFO, f"Updated capital allocation: {capital_allocation}", "auto_scaler")
     # For prod: update live config, notify orchestrator, or re-balance wallets accordingly
     return capital_allocation
 

@@ -28,3 +28,15 @@ Build and operate the world’s most aggressive, adaptive, AI/quant-driven crypt
 - `logs/` – Log output
 - `Dockerfile` – Run anywhere
 - `run.sh` – Example launch script
+
+## Disaster Recovery
+Refer to `docs/DRP.md` for the full snapshot and restore process. Before any
+upgrade or secret change, run:
+```
+python scripts/snapshot.py
+```
+To rollback to the last known good state run:
+```
+python scripts/restore.py
+```
+Snapshots and restores are logged in `snapshots/snapshot.log`.

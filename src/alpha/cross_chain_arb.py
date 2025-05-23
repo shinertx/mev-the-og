@@ -5,7 +5,10 @@ import traceback
 from decimal import Decimal
 from web3 import Web3
 from eth_account import Account
-from src.utils import load_config, notify_critical
+from src.utils import load_config
+# If you need critical notification, use:
+from src.notifier import notify_founder
+# ...and update any calls to notify_critical to use notify_founder
 from src.risk_manager import RiskManager
 from src.kill_switch import init_global_kill_switch, get_kill_switch
 

@@ -17,8 +17,11 @@ Build and operate the world’s most aggressive, adaptive, AI/quant-driven crypt
 
 4. Logs are in `logs/mev_og.log`.
 
-5. See the dashboard:  
+5. See the dashboard:
    `python main.py --dashboard`
+
+For detailed onboarding and monitoring instructions see `docs/onboarding.md` and
+`docs/monitoring.md`.
 
 ## Structure
 

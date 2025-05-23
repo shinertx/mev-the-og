@@ -30,6 +30,8 @@ notifier:
     enabled: true
     chat_id: "123456789"   # Your Telegram chat ID (do not store the token here)
     notify_on: ["error", "trade", "kill_switch"]
+  email: "founder@example.com"
+  slack_webhook: "https://hooks.slack.com/services/T000/B000/XXX"
 
 signer:
   type: "local"           # "local" or "cloud_kms"

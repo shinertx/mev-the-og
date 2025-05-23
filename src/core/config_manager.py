@@ -2,6 +2,8 @@ import os
 import yaml
 from dotenv import load_dotenv
 from typing import Optional, Dict
+
+from ..notifier import Notifier
 from pydantic import BaseModel, Field, ValidationError, RootModel
 
 # Load .env if present
@@ -82,13 +84,15 @@ def overlay_env_vars(raw_config: dict):
         raw_config["notifier"]["telegram_chat_id"] = telegram_chat_id
     return raw_config
 
-def load_app_config(config_path: str = "config.yaml") -> AppConfig:
+def load_app_config(config_path: str = "config.yaml", notifier: Optional[Notifier] = None) -> AppConfig:
     with open(config_path, "r") as f:
         raw_config = yaml.safe_load(f)
     raw_config = overlay_env_vars(raw_config)
     try:
         config = AppConfig(**raw_config)
     except ValidationError as e:
+        if notifier:
+            notifier.escalate_event("config", f"Validation failed: {e}")
         raise RuntimeError(f"Config validation failed:\n{e}")
 
     # Forbid private key in config
@@ -96,6 +100,8 @@ def load_app_config(config_path: str = "config.yaml") -> AppConfig:
         if isinstance(d, dict):
             for k, v in d.items():
                 if "private_key" in k.lower():
+                    if notifier:
+                        notifier.escalate_event("config", "Private key detected in config")
                     raise AssertionError("Private key must not be loaded in config!")
                 scan_private_key(v)
         elif isinstance(d, list):

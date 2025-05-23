@@ -1,8 +1,3 @@
-diff --git a//dev/null b/tests/test_transaction_manager.py
-index 0000000..0b749c9 100644
---- a//dev/null
-+++ b/tests/test_transaction_manager.py
-@@ -0,0 +1,67 @@
 +import asyncio
 +from unittest.mock import MagicMock
 +from decimal import Decimal

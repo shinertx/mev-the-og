@@ -1,8 +1,3 @@
-diff --git a//dev/null b/src/monitoring.py
-index 0000000..88efa96 100644
---- a//dev/null
-+++ b/src/monitoring.py
-@@ -0,0 +1,13 @@
 +import logging
 +import sqlite3
 +from typing import Optional

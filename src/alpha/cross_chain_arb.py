@@ -1,9 +1,3 @@
-<<<<<<< ours
-diff --git a//dev/null b/src/cross_chain_arb.py
-index 0000000..8ccc0af 100644
---- a//dev/null
-+++ b/src/cross_chain_arb.py
-@@ -0,0 +1,113 @@
 +import asyncio
 +import logging
 +import sqlite3

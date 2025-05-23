@@ -1,8 +1,3 @@
-diff --git a//dev/null b/src/signer_service.py
-index 0000000..a770beb 100644
---- a//dev/null
-+++ b/src/signer_service.py
-@@ -0,0 +1,49 @@
 +import os
 +from typing import Optional
 +from eth_account import Account

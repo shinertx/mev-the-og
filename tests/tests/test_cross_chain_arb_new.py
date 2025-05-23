@@ -1,8 +1,3 @@
-diff --git a//dev/null b/tests/test_cross_chain_arb_new.py
-index 0000000..04c87eb 100644
---- a//dev/null
-+++ b/tests/test_cross_chain_arb_new.py
-@@ -0,0 +1,57 @@
 +import asyncio
 +from unittest.mock import MagicMock
 +

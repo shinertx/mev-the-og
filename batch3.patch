@@ -1,0 +1,613 @@
+ (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
+diff --git a/README.md b/README.md
+index 9c26e0c..0ac17e6 100644
+--- a/README.md
++++ b/README.md
+@@ -6,25 +6,38 @@ Build and operate the world’s most aggressive, adaptive, AI/quant-driven crypt
+ ## Quickstart
+ 
+ 1. Install dependencies:  
+    `pip install -r requirements.txt`
+ 
+ 2. Fill in `config.yaml` (see `.env.example` for env vars).
+ 
+ 3. Run any alpha module:  
+    - `python main.py --mode test --alpha cross_chain`
+    - `python main.py --mode test --alpha mev_share`
+    - (or try any in `src/alpha/`)
+ 
+ 4. Logs are in `logs/mev_og.log`.
+ 
+ 5. See the dashboard:  
+    `python main.py --dashboard`
+ 
+ ## Structure
+ 
+ - `src/alpha/` – All advanced MEV modules
+ - `src/` – Core bot, risk, kill switch, utils, dashboard, notifier
+ - `tests/` – Full test suite
+ - `logs/` – Log output
+ - `Dockerfile` – Run anywhere
+ - `run.sh` – Example launch script
++
++## Capital & Risk Configuration
++
++`config.yaml` now exposes advanced risk controls:
++
++- `risk.max_drawdown_pct` – global drawdown cap
++- `risk.max_loss_usd` – max loss before pausing
++- `risk.max_trade_size_usd` – base trade cap (auto-scaled)
++- `risk.rolling_window_hours` – window for PnL tracking
++- `risk.per_alpha.{name}.max_loss_usd` – per-strategy loss threshold
++- `risk.per_alpha.{name}.max_trade_size_usd` – per-strategy trade cap
++
++When a threshold is hit the kill switch pauses trading and sends alerts via the configured notifier channels.
+diff --git a/config.example.yaml b/config.example.yaml
+index 83e06b4..7433620 100644
+--- a/config.example.yaml
++++ b/config.example.yaml
+@@ -1,39 +1,46 @@
+ # Main configuration template for MEV The OG
+ network: "mainnet"    # Network to operate on: "mainnet", "sepolia", etc.
+ mode: "test"          # "test" or "live"
+ dashboard:
+   port: 8501          # Port for the dashboard (optional)
+ 
+ rpc:
+   mainnet:
+     primary: "https://eth-mainnet.alchemyapi.io/v2/your-api-key"
+     fallback: "https://mainnet.infura.io/v3/your-infura-key"
+   sepolia:
+     primary: "https://eth-sepolia.g.alchemy.com/v2/your-api-key"
+ 
+ risk:
+   max_drawdown_pct: 5      # Stop trading if drawdown > 5%
+   max_loss_usd: 200        # Stop if USD loss > 200
++  max_trade_size_usd: 100  # Max single trade size
++  rolling_window_hours: 24 # Window for loss tracking
++  scale_increment_usd: 10
++  per_alpha:
++    cross_chain:
++      max_loss_usd: 100
++      max_trade_size_usd: 50
+ 
+ alpha:
+   enabled: ["cross_chain", "l2_sandwich"]   # List of enabled strategies
+   params:
+     cross_chain:
+       min_profit_usd: 20
+       max_slippage: 0.003
+     l2_sandwich:
+       gas_boost: true
+       sandwich_depth: 2
+ 
+ notifier:
+   telegram:
+     enabled: true
+     chat_id: "123456789"   # Your Telegram chat ID (do not store the token here)
+     notify_on: ["error", "trade", "kill_switch"]
+ 
+ signer:
+   type: "local"           # "local" or "cloud_kms"
+   endpoint: "http://localhost:8000"   # If using a local signer service
+   key_id: "prod-mev-bot-key"          # If using cloud KMS
+ 
+ # Add more config sections as needed for future strategies
+diff --git a/src/alpha/cross_chain_arb.py b/src/alpha/cross_chain_arb.py
+index 30c6af6..02cc401 100644
+--- a/src/alpha/cross_chain_arb.py
++++ b/src/alpha/cross_chain_arb.py
+@@ -138,95 +138,98 @@ class CrossChainArb:
+             gas_price_main = self.web3_mainnet.eth.gas_price / 1e9
+             gas_cost_main_usd = gas_mainnet * gas_price_main * float(price_mainnet) / 1e9
+         except:
+             gas_cost_main_usd = 2
+         try:
+             gas_l2 = self.web3_l2.eth.estimate_gas(dummy_tx)
+             gas_price_l2 = self.web3_l2.eth.gas_price / 1e9
+             gas_cost_l2_usd = gas_l2 * gas_price_l2 * float(price_l2) / 1e9
+         except:
+             gas_cost_l2_usd = 0.2
+         bridge_fee = (trade_amount * bridge_fee_bps) / Decimal(10000) * price_mainnet
+         net_profit = gross_profit - Decimal(gas_cost_main_usd) - Decimal(gas_cost_l2_usd) - bridge_fee
+         logging.info(f"[CrossChainArb] Mainnet: {price_mainnet}, L2: {price_l2}, Gross: {gross_profit:.2f}, Net: {net_profit:.2f}")
+         if net_profit > Decimal(self.config.get("min_profit_usd", 3)):
+             return {
+                 "buy_chain": "mainnet" if price_mainnet < price_l2 else "arbitrum",
+                 "sell_chain": "arbitrum" if price_mainnet < price_l2 else "mainnet",
+                 "trade_amount_eth": float(trade_amount),
+                 "net_profit_usd": float(net_profit),
+                 "price_mainnet": float(price_mainnet),
+                 "price_l2": float(price_l2)
+             }
+         return None
+ 
+     def execute_arb(self, opp):
+-        if not self.risk.check_trade(opp["net_profit_usd"]):
++        trade_size_usd = float(opp["trade_amount_eth"]) * float(opp["price_mainnet"])
++        if not self.risk.check_trade("cross_chain", trade_size_usd):
+             notify_critical("[RISK] Trade blocked by risk manager")
+             return False
+         if not self.kill.is_enabled():
+             notify_critical("[KILL SWITCH] Not enabled, aborting")
+             return False
+         try:
+             eth_amt = Decimal(opp["trade_amount_eth"])
+             in_wei = Web3.to_wei(eth_amt, "ether")
+             deadline = int(time.time()) + 180
+             in_token = self.config["eth_address"]
+             out_token = self.config["usdc_address"]
+ 
+             # Step 1: Sell ETH for USDC on the more expensive chain
+             if opp["sell_chain"] == "mainnet":
+                 router = self.mainnet_router
+                 txm = self.txm_mainnet
+                 web3 = self.web3_mainnet
+                 price = opp["price_mainnet"]
+             else:
+                 router = self.l2_router
+                 txm = self.txm_l2
+                 web3 = self.web3_l2
+                 price = opp["price_l2"]
+ 
+             amount_out_min = Decimal(price) * eth_amt * Decimal(1 - self.config.get("slippage_bps", 20) / 10000)
+             amount_out_min_wei = int(amount_out_min * (10 ** self.config["usdc_decimals"]))
+ 
+             if not self.live_mode:
+                 logging.info(f"[SIM][Arb] Would sell {eth_amt} ETH for min {amount_out_min_wei / (10**self.config['usdc_decimals']):.2f} USDC on {opp['sell_chain']}")
+                 net_after_bridge, _ = self.bridge.bridge(eth_amt)
+                 logging.info(f"[SIM][Arb] Would now buy {net_after_bridge:.6f} ETH back on {opp['buy_chain']}")
+-                self.risk.update_drawdown(opp["net_profit_usd"])
++                if not self.risk.update_pnl("cross_chain", opp["net_profit_usd"]):
++                    self.kill.pause("cross_chain risk breach")
+                 self.kill.update_pnl(opp["net_profit_usd"])
+                 return True
+ 
+             # Build, sign, send, monitor
+             tx = txm.build_swap_tx(router, in_wei, in_token, out_token, amount_out_min_wei, deadline)
+             ok, tx_hash, gas_used_eth = txm.send_and_monitor(tx)
+             if not ok:
+                 notify_critical(f"[Arb] Sell leg failed on {opp['sell_chain']}.")
+                 return False
+ 
+             # Step 2: Bridge ETH to the other chain
+             net_after_bridge, _ = self.bridge.bridge(eth_amt)
+             # (In reality, you'd wait for bridge confirmation before step 3)
+ 
+             # Step 3: Buy ETH on the cheaper chain (reverse swap)
+             # For simplicity, simulate using USDC to buy back ETH (could be a real swapExactTokensForETH)
+             # This closes the arb loop, returning to starting asset.
+             logging.info(f"[Arb] Now buying {net_after_bridge:.6f} ETH on {opp['buy_chain']}")
+             # (Here you would build/send a swap on the opp['buy_chain'] using txm_mainnet or txm_l2)
+ 
+             # All steps succeeded
+-            self.risk.update_drawdown(opp["net_profit_usd"])
++            if not self.risk.update_pnl("cross_chain", opp["net_profit_usd"]):
++                self.kill.pause("cross_chain risk breach")
+             self.kill.update_pnl(opp["net_profit_usd"])
+             return True
+         except Exception as e:
+             logging.critical(f"[CrossChainArb] Arb execution error: {traceback.format_exc()}")
+             return False
+ 
+     def run(self):
+         logging.info("[CrossChainArb] Starting cross-chain arb loop (full live mode)")
+         while self.kill.is_enabled():
+             opp = self.detect_opportunity()
+             if opp:
+                 success = self.execute_arb(opp)
+                 if not success:
+                     logging.warning("[CrossChainArb] Arb execution failed, see logs")
+             time.sleep(self.config.get("poll_interval_sec", 12))
+diff --git a/src/core/config_manager.py b/src/core/config_manager.py
+index 76549ad..016889e 100644
+--- a/src/core/config_manager.py
++++ b/src/core/config_manager.py
+@@ -1,44 +1,51 @@
+ import os
+ import yaml
+ from dotenv import load_dotenv
+ from typing import Optional, Dict
+ from pydantic import BaseModel, Field, ValidationError, RootModel
+ 
+ # Load .env if present
+ load_dotenv()
+ 
+ # --- Pydantic Models matching your config.yaml ---
+ 
+ class NotifierConfig(BaseModel):
+     telegram_token: Optional[str] = None
+     telegram_chat_id: Optional[str] = None
+     email: Optional[str] = None
+ 
++class AlphaRiskConfig(BaseModel):
++    max_loss_usd: Optional[float] = None
++    max_trade_size_usd: Optional[float] = None
++
+ class RiskConfig(BaseModel):
+     max_drawdown_pct: float = Field(gt=0, lt=100)
+     max_loss_usd: float = Field(gt=0)
++    max_trade_size_usd: float = Field(gt=0, default=100)
++    rolling_window_hours: int = Field(gt=0, default=24)
++    per_alpha: Optional[Dict[str, AlphaRiskConfig]] = None
+ 
+ class ContractsConfig(RootModel[Dict[str, str]]):
+     pass
+ 
+ class RPCUrlsConfig(RootModel[Dict[str, str]]):
+     pass
+ 
+ class WSSUrlsConfig(RootModel[Dict[str, Optional[str]]]):
+     pass
+ 
+ class AppConfig(BaseModel):
+     network: str
+     wallet_address: str
+     uniswap_wallet_address: Optional[str] = None
+     rpc_urls: RPCUrlsConfig
+     wss_urls: Optional[WSSUrlsConfig] = None
+     contracts: Optional[ContractsConfig] = None
+     mode: str
+     gas_limit: int
+     slippage_bps: int
+     trade_amount_usd: float
+     notifier: Optional[NotifierConfig] = None
+     risk: RiskConfig
+     kill_switch_enabled: Optional[bool] = True
+     target_profit: Optional[float] = None
+diff --git a/src/kill_switch.py b/src/kill_switch.py
+index bb63879..2dd20f7 100644
+--- a/src/kill_switch.py
++++ b/src/kill_switch.py
+@@ -1,27 +1,49 @@
+ import logging
++from typing import Optional
++
++from .notifier import send_telegram
+ 
+ class KillSwitch:
+     def __init__(self, config):
+         self.enabled = config.get("kill_switch_enabled", True)
+         self.max_drawdown_pct = config.get("risk", {}).get("max_drawdown_pct", 5)
+         self.max_loss_usd = config.get("risk", {}).get("max_loss_usd", 200)
+-        self.trading_enabled = True
++        self.state = "RUNNING"  # RUNNING, PAUSED, HALTED
+         self.pnl_history = []
++        telegram = config.get("notifier", {}).get("telegram", {})
++        self.tg_token = telegram.get("token") or config.get("notifier", {}).get("telegram_token")
++        self.tg_chat = telegram.get("chat_id") or config.get("notifier", {}).get("telegram_chat_id")
+ 
+     def update_pnl(self, pnl_usd):
+         self.pnl_history.append(pnl_usd)
+         if len(self.pnl_history) > 100:
+             self.pnl_history = self.pnl_history[-100:]
+         self._check_risk()
+ 
+     def _check_risk(self):
+-        if not self.enabled:
++        if not self.enabled or self.state == "HALTED":
+             return
+         total_pnl = sum(self.pnl_history)
+         min_pnl = min(self.pnl_history) if self.pnl_history else 0
+         if abs(min_pnl) > self.max_loss_usd or (total_pnl < 0 and abs(total_pnl) > self.max_loss_usd):
+-            self.trading_enabled = False
+-            logging.critical("[KILL SWITCH] Triggered: max loss exceeded. Trading disabled.")
++            self.pause("max loss exceeded")
++
++    def pause(self, reason: str):
++        if self.state != "HALTED":
++            self.state = "PAUSED"
++            logging.critical(f"[KILL SWITCH] Paused: {reason}")
++            send_telegram(f"KILL SWITCH PAUSED: {reason}", self.tg_token, self.tg_chat)
++
++    def halt(self, reason: str):
++        self.state = "HALTED"
++        logging.critical(f"[KILL SWITCH] HALTED: {reason}")
++        send_telegram(f"KILL SWITCH HALTED: {reason}", self.tg_token, self.tg_chat)
++
++    def resume(self):
++        if self.state == "PAUSED":
++            self.state = "RUNNING"
++            logging.info("[KILL SWITCH] Resumed")
++            send_telegram("KILL SWITCH RESUMED", self.tg_token, self.tg_chat)
+ 
+     def is_enabled(self):
+-        return self.trading_enabled
++        return self.enabled and self.state == "RUNNING"
+diff --git a/src/mev_bot.py b/src/mev_bot.py
+index e6396ee..5c90521 100644
+--- a/src/mev_bot.py
++++ b/src/mev_bot.py
+@@ -2,36 +2,36 @@ import time
+ from web3 import Web3
+ from .utils import load_config
+ from .risk_manager import RiskManager
+ from .kill_switch import KillSwitch
+ from .notifier import send_telegram
+ 
+ class MEVBot:
+     def __init__(self, config_path="config.yaml"):
+         self.config = load_config(config_path)
+         self.network = self.config.get("network")
+         self.mode = self.config.get("mode")
+         self.alchemy_api_key = self.config.get("alchemy_api_key")
+         self.web3 = Web3(Web3.HTTPProvider(f"https://eth-{self.network}.g.alchemy.com/v2/{self.alchemy_api_key}"))
+         self.wallet = self.config.get("wallet_address")
+         self.risk = RiskManager(self.config)
+         self.kill = KillSwitch(self.config)
+         print(f"[MEVBot] Initialized in {self.mode.upper()} mode on {self.network}")
+ 
+     def run(self):
+         print("[MEVBot] Running main bot loop (demo mode)...")
+         latest = self.web3.eth.block_number
+         print(f"[MEVBot] Latest block: {latest}")
+ 
+         # DEMO: Update risk/kill logic (stub)
+         fake_pnl = 0  # replace with real PnL calc as needed
+-        self.risk.update_drawdown(fake_pnl)
++        self.risk.update_pnl("global", fake_pnl)
+         self.kill.update_pnl(fake_pnl)
+         if not self.kill.is_enabled():
+             print("[MEVBot] Kill switch triggered. Exiting.")
+             send_telegram("KILL SWITCH: Trading disabled!", self.config['notifier'].get('telegram_token',''), self.config['notifier'].get('telegram_chat_id',''))
+             return
+         # ... extend with further strategies or module hooks
+ 
+ if __name__ == "__main__":
+     bot = MEVBot()
+     bot.run()
+diff --git a/src/risk_manager.py b/src/risk_manager.py
+index 1c2f6b0..236be29 100644
+--- a/src/risk_manager.py
++++ b/src/risk_manager.py
+@@ -1,21 +1,111 @@
+ import logging
++from collections import deque, defaultdict
++from dataclasses import dataclass, field
++from datetime import datetime, timedelta
++from typing import Dict, Deque, Tuple
++
++
++@dataclass
++class AlphaState:
++    max_loss_usd: float
++    max_trade_size_usd: float
++    pnl_history: Deque[Tuple[datetime, float]] = field(default_factory=deque)
++    trades: int = 0
++    wins: int = 0
++    losses: int = 0
++    disabled: bool = False
++
+ 
+ class RiskManager:
+-    def __init__(self, config):
+-        self.max_drawdown_pct = config.get("risk", {}).get("max_drawdown_pct", 5)
+-        self.max_loss_usd = config.get("risk", {}).get("max_loss_usd", 200)
+-        self.max_trade_size_usd = config.get("trade_amount_usd", 100)
+-        self.current_drawdown = 0
+-
+-    def check_trade(self, trade_size_usd):
+-        if trade_size_usd > self.max_trade_size_usd:
+-            logging.warning("[RiskManager] Trade size too large, reducing.")
+-            return self.max_trade_size_usd
+-        return trade_size_usd
+-
+-    def update_drawdown(self, pnl):
+-        self.current_drawdown += pnl
+-        if abs(self.current_drawdown) > self.max_loss_usd:
+-            logging.critical("[RiskManager] Max drawdown breached!")
++    """Live capital tracking and gating logic"""
++
++    def __init__(self, config: Dict):
++        rcfg = config.get("risk", {})
++        self.max_drawdown_pct = rcfg.get("max_drawdown_pct", 5)
++        self.max_loss_usd = rcfg.get("max_loss_usd", 200)
++        self.max_trade_size_usd = rcfg.get("max_trade_size_usd", 100)
++        self.rolling_window_hours = rcfg.get("rolling_window_hours", 24)
++        self.scale_increment = rcfg.get("scale_increment_usd", 50)
++        self.starting_capital = config.get("starting_capital", 1000.0)
++        self.current_capital = self.starting_capital
++        self.peak_capital = self.starting_capital
++        self.pnl_history: Deque[Tuple[datetime, float]] = deque()
++
++        self.alphas: Dict[str, AlphaState] = {}
++        for name, aconf in rcfg.get("per_alpha", {}).items():
++            self.alphas[name] = AlphaState(
++                max_loss_usd=aconf.get("max_loss_usd", self.max_loss_usd),
++                max_trade_size_usd=aconf.get("max_trade_size_usd", self.max_trade_size_usd),
++            )
++
++    # --- Utility helpers ---
++    def _prune(self, history: Deque[Tuple[datetime, float]]):
++        cutoff = datetime.utcnow() - timedelta(hours=self.rolling_window_hours)
++        while history and history[0][0] < cutoff:
++            history.popleft()
++
++    def _window_pnl(self, history: Deque[Tuple[datetime, float]]):
++        self._prune(history)
++        return sum(p for _, p in history)
++
++    # --- Public API ---
++    def check_trade(self, strategy: str, trade_size_usd: float) -> bool:
++        alpha = self.alphas.get(strategy)
++        limit = self.max_trade_size_usd
++        if alpha:
++            limit = min(limit, alpha.max_trade_size_usd)
++            if alpha.disabled:
++                logging.warning(f"[RiskManager] Strategy {strategy} is disabled")
++                return False
++        if trade_size_usd > limit:
++            logging.warning("[RiskManager] Trade size too large; blocking trade")
++            return False
++        # drawdown check
++        projected = self.current_capital - trade_size_usd
++        if projected < self.peak_capital * (1 - self.max_drawdown_pct / 100):
++            logging.critical("[RiskManager] Global drawdown limit reached")
+             return False
+         return True
++
++    def update_pnl(self, strategy: str, pnl_usd: float) -> bool:
++        now = datetime.utcnow()
++        self.pnl_history.append((now, pnl_usd))
++        alpha = self.alphas.get(strategy)
++        if alpha:
++            alpha.pnl_history.append((now, pnl_usd))
++            alpha.trades += 1
++            if pnl_usd > 0:
++                alpha.wins += 1
++            elif pnl_usd < 0:
++                alpha.losses += 1
++        self.current_capital += pnl_usd
++        if self.current_capital > self.peak_capital:
++            self.peak_capital = self.current_capital
++        # evaluate windows
++        total_loss = -min(0, self._window_pnl(self.pnl_history))
++        if total_loss > self.max_loss_usd:
++            logging.critical("[RiskManager] Global loss limit breached")
++            return False
++        drawdown = (self.peak_capital - self.current_capital) / self.peak_capital * 100
++        if drawdown > self.max_drawdown_pct:
++            logging.critical("[RiskManager] Global drawdown exceeded")
++            return False
++        if alpha:
++            loss_alpha = -min(0, self._window_pnl(alpha.pnl_history))
++            if loss_alpha > alpha.max_loss_usd:
++                alpha.disabled = True
++                logging.critical(f"[RiskManager] {strategy} disabled due to losses")
++                return False
++        return True
++
++    def scale_logic(self):
++        """Simple scaling: increase trade size if recent pnl positive."""
++        window_pnl = self._window_pnl(self.pnl_history)
++        if window_pnl > 0:
++            self.max_trade_size_usd += self.scale_increment
++        elif window_pnl < -self.max_loss_usd / 2:
++            self.max_trade_size_usd = max(self.scale_increment, self.max_trade_size_usd - self.scale_increment)
++
++    def is_strategy_active(self, strategy: str) -> bool:
++        alpha = self.alphas.get(strategy)
++        return not alpha.disabled if alpha else True
+diff --git a/tests/test_config_manager.py b/tests/test_config_manager.py
+index 0265f8d..43a1926 100644
+--- a/tests/test_config_manager.py
++++ b/tests/test_config_manager.py
+@@ -2,50 +2,56 @@ import os
+ import pytest
+ from src.core.config_manager import load_app_config, AppConfig
+ 
+ VALID_CONFIG = """
+ network: sepolia
+ wallet_address: "0xA061e51F27F49EeD5F6F1Afed049206764Be7A9c"
+ uniswap_wallet_address: "0x67Da2453139cA6D3D6989AB3BC3fd0583E9F7B3d"
+ rpc_urls:
+   mainnet: "https://mainnet.infura.io/v3/YOUR_INFURA_PROJECT_ID"
+   sepolia: "https://sepolia.infura.io/v3/YOUR_INFURA_PROJECT_ID"
+ wss_urls:
+   mainnet: "wss://mainnet.infura.io/ws/v3/YOUR_INFURA_PROJECT_ID"
+ contracts:
+   aave_v3_sepolia: "0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951"
+ mode: "test"
+ gas_limit: 3500000
+ slippage_bps: 50
+ trade_amount_usd: 100
+ notifier:
+   telegram_token: ""
+   telegram_chat_id: ""
+   email: ""
+ risk:
+   max_drawdown_pct: 5
+   max_loss_usd: 200
++  max_trade_size_usd: 100
++  rolling_window_hours: 24
++  per_alpha:
++    s1:
++      max_loss_usd: 50
++      max_trade_size_usd: 20
+ kill_switch_enabled: true
+ target_profit: 0.02
+ starting_capital: 2000.0
+ """
+ 
+ def test_valid_config_load(tmp_path):
+     cfg_file = tmp_path / "config.yaml"
+     cfg_file.write_text(VALID_CONFIG)
+     cfg = load_app_config(str(cfg_file))
+     assert isinstance(cfg, AppConfig)
+     assert cfg.network == "sepolia"
+     assert "mainnet" in cfg.rpc_urls.root
+ 
+ def test_env_var_injection(monkeypatch, tmp_path):
+     config_text = VALID_CONFIG
+     cfg_file = tmp_path / "config.yaml"
+     cfg_file.write_text(config_text)
+     monkeypatch.setenv("INFURA_PROJECT_ID", "abc123xyz")
+     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "abcde")
+     monkeypatch.setenv("TELEGRAM_CHAT_ID", "123456")
+     cfg = load_app_config(str(cfg_file))
+     assert "abc123xyz" in cfg.rpc_urls.root["mainnet"]
+     assert cfg.notifier.telegram_token == "abcde"
+     assert cfg.notifier.telegram_chat_id == "123456"
+ 
+diff --git a/tests/test_risk_manager.py b/tests/test_risk_manager.py
+new file mode 100644
+index 0000000..36c3817
+--- /dev/null
++++ b/tests/test_risk_manager.py
+@@ -0,0 +1,53 @@
++from src.risk_manager import RiskManager
++
++
++def test_slow_bleed_triggers_global_limit():
++    cfg = {
++        "risk": {
++            "max_loss_usd": 10,
++            "max_drawdown_pct": 50,
++            "rolling_window_hours": 24,
++            "max_trade_size_usd": 5,
++        },
++        "starting_capital": 100,
++    }
++    r = RiskManager(cfg)
++    for _ in range(5):
++        ok = r.update_pnl("alpha", -3)
++    assert not ok  # should breach after cumulative -15
++
++
++def test_per_alpha_disable_only_strategy():
++    cfg = {
++        "risk": {
++            "max_loss_usd": 100,
++            "rolling_window_hours": 24,
++            "max_trade_size_usd": 50,
++            "per_alpha": {"s1": {"max_loss_usd": 5, "max_trade_size_usd": 10}},
++        },
++        "starting_capital": 100,
++    }
++    r = RiskManager(cfg)
++    for _ in range(2):
++        r.update_pnl("s1", -3)
++    assert r.alphas["s1"].disabled
++    assert r.is_strategy_active("s1") is False
++    # another strategy should remain active
++    assert r.is_strategy_active("other") is True
++
++
++def test_scaling_logic_adjusts_trade_size():
++    cfg = {
++        "risk": {
++            "max_loss_usd": 100,
++            "rolling_window_hours": 24,
++            "max_trade_size_usd": 10,
++            "scale_increment_usd": 5,
++        },
++        "starting_capital": 100,
++    }
++    r = RiskManager(cfg)
++    for _ in range(3):
++        r.update_pnl("s1", 2)
++    r.scale_logic()
++    assert r.max_trade_size_usd == 15
+ 
+EOF
+)

@@ -28,3 +28,26 @@ Build and operate the world’s most aggressive, adaptive, AI/quant-driven crypt
 - `logs/` – Log output
 - `Dockerfile` – Run anywhere
 - `run.sh` – Example launch script
+
+## Configuration & Secret Management
+
+All secrets must live in `.env` only. Copy `.env.example` to `.env` and fill values.
+`config.yaml` holds non-secret parameters and is strictly validated at startup.
+
+To rotate secrets:
+1. Run `scripts/rotate_secrets.py` to back up the current `.env`.
+2. Edit the `.env` with new values.
+3. Restart the bot.
+
+If the bot halts due to config or secret issues:
+1. Check logs for `ConfigMonitor` messages.
+2. Restore the last known-good `.env` or `config.yaml` from backups.
+3. Fix any validation errors and restart.
+
+The `ConfigMonitor` halts trading if `.env` or `config.yaml` change while running.
+Notifications are sent via all configured channels when this occurs.
+
+### Troubleshooting
+- Ensure `.env` syntax is `KEY=value` per line with no quotes.
+- Missing required fields will raise a `RuntimeError` during startup.
+- After resolving issues, restart the bot to resume operation.

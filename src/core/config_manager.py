@@ -1,11 +1,16 @@
 import os
 import yaml
-from dotenv import load_dotenv
 from typing import Optional, Dict
 from pydantic import BaseModel, Field, ValidationError, RootModel
+from .env_manager import load_env_file, load_env_config
 
-# Load .env if present
-load_dotenv()
+# Load and validate .env if present
+load_env_file()
+_ENV_CFG = None
+try:
+    _ENV_CFG = load_env_config()
+except RuntimeError as e:
+    raise RuntimeError(f"Environment validation failed: {e}")
 
 # --- Pydantic Models matching your config.yaml ---
 

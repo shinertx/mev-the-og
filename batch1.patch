@@ -1,0 +1,842 @@
+ (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
+diff --git a/README.md b/README.md
+index 9c26e0c..1d62936 100644
+--- a/README.md
++++ b/README.md
+@@ -6,25 +6,54 @@ Build and operate the world’s most aggressive, adaptive, AI/quant-driven crypt
+ ## Quickstart
+ 
+ 1. Install dependencies:  
+    `pip install -r requirements.txt`
+ 
+ 2. Fill in `config.yaml` (see `.env.example` for env vars).
+ 
+ 3. Run any alpha module:  
+    - `python main.py --mode test --alpha cross_chain`
+    - `python main.py --mode test --alpha mev_share`
+    - (or try any in `src/alpha/`)
+ 
+ 4. Logs are in `logs/mev_og.log`.
+ 
+ 5. See the dashboard:  
+    `python main.py --dashboard`
+ 
+ ## Structure
+ 
+ - `src/alpha/` – All advanced MEV modules
+ - `src/` – Core bot, risk, kill switch, utils, dashboard, notifier
+ - `tests/` – Full test suite
+ - `logs/` – Log output
+ - `Dockerfile` – Run anywhere
+ - `run.sh` – Example launch script
++
++## Kill Switch
++
++All trading flows route through a centralised kill switch with four tiers:
++
++1. **Pause** – temporarily stop new trades while monitoring continues.
++2. **Reduce Risk** – trade sizes are automatically cut in half.
++3. **Liquidate** – existing positions should be unwound.
++4. **Halt** – trading stops entirely and the founder is alerted immediately.
++
++Configure `founder_chat_id` and `kill_switch_max_errors` in `config.yaml` to
++control alerting and sensitivity.
++
++### Expected behaviour
++
++* Every trade updates PnL and drawdown via the global kill switch.
++* On RPC outages or repeated errors the bot escalates through pause → halt.
++* Invalid or missing config halts the system on startup and notifies the founder.
++* If Telegram alerts fail, an email fallback is triggered.
++
++### Restore & DRP
++
++1. Inspect `logs/mev_og.log` for the halt reason.
++2. Fix the root cause and update `config.yaml` if needed.
++3. Verify notifier channels with `tests/test_notifier.py`.
++4. Reset kill switch state via `manual_override(PAUSE, confirm=True)`.
++5. Start the bot and monitor for at least one full cycle.
++
++If all notifiers fail, consult the logs and manually reach out to the founder.
+diff --git a/config.example.yaml b/config.example.yaml
+index 83e06b4..51ce738 100644
+--- a/config.example.yaml
++++ b/config.example.yaml
+@@ -7,33 +7,38 @@ dashboard:
+ rpc:
+   mainnet:
+     primary: "https://eth-mainnet.alchemyapi.io/v2/your-api-key"
+     fallback: "https://mainnet.infura.io/v3/your-infura-key"
+   sepolia:
+     primary: "https://eth-sepolia.g.alchemy.com/v2/your-api-key"
+ 
+ risk:
+   max_drawdown_pct: 5      # Stop trading if drawdown > 5%
+   max_loss_usd: 200        # Stop if USD loss > 200
+ 
+ alpha:
+   enabled: ["cross_chain", "l2_sandwich"]   # List of enabled strategies
+   params:
+     cross_chain:
+       min_profit_usd: 20
+       max_slippage: 0.003
+     l2_sandwich:
+       gas_boost: true
+       sandwich_depth: 2
+ 
+ notifier:
+   telegram:
+     enabled: true
+     chat_id: "123456789"   # Your Telegram chat ID (do not store the token here)
+-    notify_on: ["error", "trade", "kill_switch"]
++    founder_chat_id: "123456789"  # Founder Telegram ID for critical alerts
++  email: "founder@example.com"
++  notify_on: ["error", "trade", "kill_switch"]
++
++kill_switch_max_errors: 3
++kill_switch_enabled: true
+ 
+ signer:
+   type: "local"           # "local" or "cloud_kms"
+   endpoint: "http://localhost:8000"   # If using a local signer service
+   key_id: "prod-mev-bot-key"          # If using cloud KMS
+ 
+ # Add more config sections as needed for future strategies
+diff --git a/main.py b/main.py
+index 8623585..2f7757f 100644
+--- a/main.py
++++ b/main.py
+@@ -27,28 +27,30 @@ def main():
+     parser.add_argument("--mode", type=str, default=None, help="test or live")
+     parser.add_argument("--alpha", type=str, default=None, help="alpha module: cross_chain, l2_sandwich, bridge_games, mev_share, flash_loan, liquidation, nftfi")
+     parser.add_argument("--dashboard", action="store_true", help="launch dashboard")
+     args = parser.parse_args()
+ 
+     # Setup logging
+     os.makedirs('logs', exist_ok=True)
+     logging.basicConfig(filename='logs/mev_og.log', level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+ 
+     config = load_config("config.yaml")
+     if args.mode:
+         config['mode'] = args.mode
+ 
+     if args.dashboard:
+         from src.dashboard import launch_dashboard
+         port = config.get('dashboard', {}).get('port', 8501)
+         launch_dashboard(port)
+         return
+ 
+     if args.alpha and args.alpha in alpha_map:
+         mod = __import__(f"src.alpha.{alpha_map[args.alpha]}", fromlist=[f"run_{alpha_map[args.alpha]}"])
+         getattr(mod, f"run_{alpha_map[args.alpha]}")(config)
+     else:
+         bot = MEVBot()
+         bot.run()
++        if bot.kill.state >= bot.kill.HALT:
++            logging.critical("Kill switch HALT state reached. Exiting main.")
+ 
+ if __name__ == "__main__":
+     main()
+diff --git a/src/alpha/cross_chain_arb.py b/src/alpha/cross_chain_arb.py
+index 30c6af6..9a250b3 100644
+--- a/src/alpha/cross_chain_arb.py
++++ b/src/alpha/cross_chain_arb.py
+@@ -1,35 +1,35 @@
+ import logging
+ import os
+ import time
+ import traceback
+ from decimal import Decimal
+ from web3 import Web3
+ from eth_account import Account
+ from src.utils import load_config, notify_critical
+ from src.risk_manager import RiskManager
+-from src.kill_switch import KillSwitch
++from src.kill_switch import init_global_kill_switch, get_kill_switch
+ 
+ # === Signer Abstraction ===
+ class SignerService:
+     """Signer abstraction: for local dev uses env var, for prod can be swapped to hardware/KMS."""
+     def __init__(self):
+         key = os.environ.get("PRIVATE_KEY")
+         if not key:
+             raise RuntimeError("PRIVATE_KEY not set in environment.")
+         self.account = Account.from_key(key)
+         self.private_key = key
+ 
+     def sign(self, tx_dict):
+         return Account.sign_transaction(tx_dict, self.private_key)
+ 
+     def get_address(self):
+         return self.account.address
+ 
+ # === Simulated Bridge ===
+ class SimulatedBridge:
+     """Simulates cross-chain transfer. Replace with real integration for prod."""
+     def __init__(self, fee_bps=8, min_delay=10, max_delay=25):
+         self.fee_bps = fee_bps
+         self.min_delay = min_delay
+         self.max_delay = max_delay
+ 
+@@ -68,52 +68,52 @@ class TransactionManager:
+ 
+     def send_and_monitor(self, tx_dict):
+         signed = self.signer.sign(tx_dict)
+         tx_hash = self.web3.eth.send_raw_transaction(signed.rawTransaction)
+         logging.info(f"[TxManager] Sent tx {tx_hash.hex()}, waiting for confirmation...")
+         try:
+             receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+             if receipt.status == 1:
+                 logging.info(f"[TxManager] Tx {tx_hash.hex()} confirmed in block {receipt.blockNumber}")
+                 return True, tx_hash, receipt.gasUsed * tx_dict['gasPrice'] / 1e18  # returns gas in ETH
+             else:
+                 logging.error(f"[TxManager] Tx reverted: {tx_hash.hex()}")
+                 return False, tx_hash, None
+         except Exception as e:
+             logging.error(f"[TxManager] Tx receipt error: {e}")
+             return False, tx_hash, None
+ 
+ # === Main Cross-Chain Arb ===
+ class CrossChainArb:
+     def __init__(self, config_path="config.yaml"):
+         self.config = load_config(config_path)
+         self.signer_service = SignerService()
+         self.wallet = self.signer_service.get_address()
+         self.web3_mainnet = Web3(Web3.HTTPProvider(self.config["rpc_urls"]["mainnet"]))
+         self.web3_l2 = Web3(Web3.HTTPProvider(self.config["rpc_urls"]["arbitrum"]))
+-        self.risk = RiskManager(self.config)
+-        self.kill = KillSwitch(self.config)
++        self.kill = init_global_kill_switch(self.config)
++        self.risk = RiskManager(self.config, self.kill)
+         self.live_mode = self.config.get("mode", "test") == "live"
+         self.bridge = SimulatedBridge(fee_bps=self.config.get("bridge_fee_bps", 8))
+         # Routers must be present in config
+         self.mainnet_router = self.web3_mainnet.eth.contract(
+             address=self.config["uniswap_router_address"]["mainnet"],
+             abi=self.config["uniswap_router_abi"])
+         self.l2_router = self.web3_l2.eth.contract(
+             address=self.config["uniswap_router_address"]["arbitrum"],
+             abi=self.config["uniswap_router_abi"])
+         # Transaction Managers
+         self.txm_mainnet = TransactionManager(self.web3_mainnet, self.wallet, self.signer_service)
+         self.txm_l2 = TransactionManager(self.web3_l2, self.wallet, self.signer_service)
+ 
+     def get_price(self, web3, router, token_addr, amount_in_wei):
+         try:
+             out = router.functions.getAmountsOut(amount_in_wei, [
+                 token_addr, self.config["usdc_address"]
+             ]).call()
+             return Decimal(out[-1]) / (10 ** self.config["usdc_decimals"])
+         except Exception as e:
+             logging.warning(f"[CrossChainArb] get_price failed: {e}")
+             return None
+ 
+     def detect_opportunity(self):
+         eth_token = self.config["eth_address"]
+diff --git a/src/alpha/flash_loan.py b/src/alpha/flash_loan.py
+index 1b7bac8..66d3c42 100644
+--- a/src/alpha/flash_loan.py
++++ b/src/alpha/flash_loan.py
+@@ -1,24 +1,31 @@
+ import logging
+ import time
++from src.kill_switch import get_kill_switch
++from src.risk_manager import RiskManager
+ 
+ def scan_flash_loan_opportunities():
+     logging.info("[Alpha][FlashLoan] Scanning for flash loan arb opportunities...")
+     return {"pool": "Aave", "token": "ETH", "amount": 1000, "profit": 1.5}
+ 
+ def execute_flash_loan(config, opportunity):
+     logging.info(f"[Alpha][FlashLoan] Executing flash loan on {opportunity['pool']} for {opportunity['amount']} {opportunity['token']}")
+     time.sleep(2)
++    pnl = opportunity.get("profit", 0)
++    kill = get_kill_switch()
++    rm: RiskManager = kill.risk_manager  # type: ignore[attr-defined]
++    rm.update_drawdown(pnl)
++    kill.update_pnl(pnl)
+     return True
+ 
+ def run_flash_loan(config):
+     opp = scan_flash_loan_opportunities()
+     if opp:
+         if config["mode"] == "test":
+             logging.info(f"[SIM][FlashLoan] Would execute: {opp}")
+         else:
+             execute_flash_loan(config, opp)
+ 
+ if __name__ == "__main__":
+     import yaml
+     config = yaml.safe_load(open("config.yaml"))
+     run_flash_loan(config)
+diff --git a/src/alpha/flash_loan_liquidation.py b/src/alpha/flash_loan_liquidation.py
+index f442322..7536734 100644
+--- a/src/alpha/flash_loan_liquidation.py
++++ b/src/alpha/flash_loan_liquidation.py
+@@ -1,28 +1,36 @@
+ import logging
+ import time
++from src.kill_switch import get_kill_switch
++from src.risk_manager import RiskManager
+ 
+ def find_liquidation_targets():
+     # TODO: Connect to Aave/Compound API or subgraph
+     return [{"account": "0xabc...", "debt": 1000, "collateral": 1200}]
+ 
+ def execute_flash_loan_liquidation(target):
+     logging.info(f"[FLL] Executing flash loan liquidation on {target['account']}")
+     # TODO: Call flash loan + liquidation contract
+-    return True
++    success = True
++    pnl = 0.0  # placeholder
++    kill = get_kill_switch()
++    rm: RiskManager = kill.risk_manager  # type: ignore[attr-defined]
++    rm.update_drawdown(pnl)
++    kill.update_pnl(pnl)
++    return success
+ 
+ def run_flash_loan_liquidation(config):
+     logging.info("[FLL] Running flash loan liquidation cascade module...")
+     targets = find_liquidation_targets()
+     for target in targets:
+         execute_flash_loan_liquidation(target)
+         time.sleep(1)
+ 
+ # TEST HARNESS
+ def test_find_liquidation_targets():
+     targets = find_liquidation_targets()
+     assert isinstance(targets, list) and "account" in targets[0]
+ 
+ if __name__ == "__main__":
+     import yaml
+     config = yaml.safe_load(open("../config.yaml"))
+     run_flash_loan_liquidation(config)
+diff --git a/src/alpha/liquidation.py b/src/alpha/liquidation.py
+index a92a9de..a7c1188 100644
+--- a/src/alpha/liquidation.py
++++ b/src/alpha/liquidation.py
+@@ -1,24 +1,31 @@
+ import logging
+ import time
++from src.kill_switch import get_kill_switch
++from src.risk_manager import RiskManager
+ 
+ def scan_liquidation_targets():
+     logging.info("[Alpha][Liquidation] Scanning for undercollateralized loans...")
+     return {"protocol": "Aave", "account": "0xabc...", "debt": 1000, "collateral": 900}
+ 
+ def execute_liquidation(config, target):
+     logging.info(f"[Alpha][Liquidation] Executing liquidation on {target['protocol']} for {target['account']}")
+     time.sleep(1)
++    pnl = target.get("profit", 0)
++    kill = get_kill_switch()
++    rm: RiskManager = kill.risk_manager  # type: ignore[attr-defined]
++    rm.update_drawdown(pnl)
++    kill.update_pnl(pnl)
+     return True
+ 
+ def run_liquidation(config):
+     target = scan_liquidation_targets()
+     if target:
+         if config["mode"] == "test":
+             logging.info(f"[SIM][Liquidation] Would execute: {target}")
+         else:
+             execute_liquidation(config, target)
+ 
+ if __name__ == "__main__":
+     import yaml
+     config = yaml.safe_load(open("config.yaml"))
+     run_liquidation(config)
+diff --git a/src/alpha/nftfi.py b/src/alpha/nftfi.py
+index 9e7c78c..08431ff 100644
+--- a/src/alpha/nftfi.py
++++ b/src/alpha/nftfi.py
+@@ -1,24 +1,31 @@
+ import logging
+ import time
++from src.kill_switch import get_kill_switch
++from src.risk_manager import RiskManager
+ 
+ def scan_nftfi_arbs():
+     logging.info("[Alpha][NFTfi] Scanning for NFT loan/arbitrage...")
+     return {"platform": "NFTfi", "loan_id": 42, "expected_profit": 0.2}
+ 
+ def execute_nftfi_arb(config, opportunity):
+     logging.info(f"[Alpha][NFTfi] Executing NFTfi arb on loan {opportunity['loan_id']}")
+     time.sleep(1)
++    pnl = opportunity.get("expected_profit", 0)
++    kill = get_kill_switch()
++    rm: RiskManager = kill.risk_manager  # type: ignore[attr-defined]
++    rm.update_drawdown(pnl)
++    kill.update_pnl(pnl)
+     return True
+ 
+ def run_nftfi(config):
+     opp = scan_nftfi_arbs()
+     if opp:
+         if config["mode"] == "test":
+             logging.info(f"[SIM][NFTfi] Would execute: {opp}")
+         else:
+             execute_nftfi_arb(config, opp)
+ 
+ if __name__ == "__main__":
+     import yaml
+     config = yaml.safe_load(open("config.yaml"))
+     run_nftfi(config)
+diff --git a/src/kill_switch.py b/src/kill_switch.py
+index bb63879..bc3576f 100644
+--- a/src/kill_switch.py
++++ b/src/kill_switch.py
+@@ -1,27 +1,124 @@
++"""Centralised kill switch handling all critical failure modes."""
++
++from __future__ import annotations
++
+ import logging
++from typing import Callable, Dict, Optional
++from datetime import datetime
++
++
++KILL_SWITCH: "KillSwitch" | None = None
++
++
++def init_global_kill_switch(config: Dict, notifier: Optional[Callable[[str], None]] = None) -> "KillSwitch":
++    """Initialise the global kill switch singleton."""
++    global KILL_SWITCH
++    if KILL_SWITCH is None:
++        KILL_SWITCH = KillSwitch(config, notifier=notifier)
++    return KILL_SWITCH
++
++
++def get_kill_switch() -> "KillSwitch":
++    if KILL_SWITCH is None:
++        raise RuntimeError("Kill switch not initialised")
++    return KILL_SWITCH
++
+ 
+ class KillSwitch:
+-    def __init__(self, config):
++    """Multi-tier kill switch with escalation logic."""
++
++    RUNNING = 0
++    PAUSE = 1
++    REDUCE_RISK = 2
++    LIQUIDATE = 3
++    HALT = 4
++
++    STATE_NAMES = {
++        RUNNING: "running",
++        PAUSE: "pause",
++        REDUCE_RISK: "reduce_risk",
++        LIQUIDATE: "liquidate",
++        HALT: "halt",
++    }
++
++    def __init__(self, config: Dict, notifier: Optional[Callable[[str], None]] = None):
+         self.enabled = config.get("kill_switch_enabled", True)
+         self.max_drawdown_pct = config.get("risk", {}).get("max_drawdown_pct", 5)
+         self.max_loss_usd = config.get("risk", {}).get("max_loss_usd", 200)
+-        self.trading_enabled = True
+-        self.pnl_history = []
++        self.max_errors = config.get("kill_switch_max_errors", 3)
++        self.state = self.RUNNING
++        self.pnl_history: list[float] = []
++        self.error_count = 0
++        self.notifier = notifier
++        self.risk_manager = None
++
++    # --- State helpers -------------------------------------------------
+ 
+-    def update_pnl(self, pnl_usd):
++    def is_trading_allowed(self) -> bool:
++        return self.state in (self.RUNNING, self.REDUCE_RISK)
++
++    def is_enabled(self) -> bool:
++        return self.enabled and self.state < self.HALT
++
++    def _notify(self, message: str) -> None:
++        logging.critical(message)
++        if self.notifier:
++            try:
++                self.notifier(message)
++            except Exception as e:  # pragma: no cover - notifier failures shouldn't break bot
++                logging.error(f"[KillSwitch] notifier error: {e}")
++
++    def _escalate(self, new_state: int, reason: str) -> None:
++        if not self.enabled or new_state <= self.state:
++            return
++        self.state = new_state
++        self._notify(f"[KILL SWITCH] Escalated to {self.STATE_NAMES[new_state].upper()}: {reason}")
++
++    def attach_risk_manager(self, rm) -> None:
++        self.risk_manager = rm
++
++    # --- External hooks -------------------------------------------------
++
++    def record_trade_error(self, reason: str) -> None:
++        self.error_count += 1
++        if self.error_count >= self.max_errors and self.state < self.PAUSE:
++            self._escalate(self.PAUSE, reason)
++        elif self.error_count >= self.max_errors * 2 and self.state < self.HALT:
++            self._escalate(self.HALT, reason)
++
++    def record_api_disconnect(self, reason: str = "rpc disconnect") -> None:
++        if self.state < self.PAUSE:
++            self._escalate(self.PAUSE, reason)
++        elif self.state < self.HALT:
++            self._escalate(self.HALT, reason)
++
++    def manual_override(self, new_state: int, reason: str = "manual override", *, confirm: bool = False, source: str = "manual") -> None:
++        if new_state == self.HALT and not confirm:
++            logging.warning("[KillSwitch] HALT override requested without confirm")
++            self._notify("HALT override attempted without confirmation")
++            return
++        self._notify(
++            f"Override by {source} at {datetime.utcnow().isoformat()} : {self.STATE_NAMES[new_state].upper()} - {reason}"
++        )
++        self._escalate(new_state, reason)
++
++    # --- PnL/Risk tracking ---------------------------------------------
++
++    def update_pnl(self, pnl_usd: float) -> None:
+         self.pnl_history.append(pnl_usd)
+         if len(self.pnl_history) > 100:
+             self.pnl_history = self.pnl_history[-100:]
+         self._check_risk()
+ 
+-    def _check_risk(self):
++    def _check_risk(self) -> None:
+         if not self.enabled:
+             return
+         total_pnl = sum(self.pnl_history)
+         min_pnl = min(self.pnl_history) if self.pnl_history else 0
+         if abs(min_pnl) > self.max_loss_usd or (total_pnl < 0 and abs(total_pnl) > self.max_loss_usd):
+-            self.trading_enabled = False
+-            logging.critical("[KILL SWITCH] Triggered: max loss exceeded. Trading disabled.")
++            self._escalate(self.HALT, "max loss exceeded")
++
++    def record_risk_breach(self, reason: str) -> None:
++        """Explicit risk breach trigger from RiskManager."""
++        self._escalate(self.HALT, reason)
+ 
+-    def is_enabled(self):
+-        return self.trading_enabled
+diff --git a/src/mev_bot.py b/src/mev_bot.py
+index e6396ee..8615bd3 100644
+--- a/src/mev_bot.py
++++ b/src/mev_bot.py
+@@ -1,37 +1,50 @@
+ import time
+ from web3 import Web3
+ from .utils import load_config
+ from .risk_manager import RiskManager
+-from .kill_switch import KillSwitch
+-from .notifier import send_telegram
++from .kill_switch import KillSwitch, init_global_kill_switch, get_kill_switch
++from .notifier import notify_founder
+ 
+ class MEVBot:
+     def __init__(self, config_path="config.yaml"):
+-        self.config = load_config(config_path)
++        try:
++            self.config = load_config(config_path)
++        except Exception as e:
++            notify_founder(f"Config error: {e}", {})
++            raise
+         self.network = self.config.get("network")
+         self.mode = self.config.get("mode")
+         self.alchemy_api_key = self.config.get("alchemy_api_key")
+         self.web3 = Web3(Web3.HTTPProvider(f"https://eth-{self.network}.g.alchemy.com/v2/{self.alchemy_api_key}"))
+         self.wallet = self.config.get("wallet_address")
+-        self.risk = RiskManager(self.config)
+-        self.kill = KillSwitch(self.config)
++        notify_cb = lambda msg: notify_founder(msg, self.config.get("notifier", {}))
++        self.kill = init_global_kill_switch(self.config, notifier=notify_cb)
++        self.risk = RiskManager(self.config, self.kill)
+         print(f"[MEVBot] Initialized in {self.mode.upper()} mode on {self.network}")
+ 
+     def run(self):
+         print("[MEVBot] Running main bot loop (demo mode)...")
+-        latest = self.web3.eth.block_number
+-        print(f"[MEVBot] Latest block: {latest}")
++        try:
++            latest = self.web3.eth.block_number
++            print(f"[MEVBot] Latest block: {latest}")
++        except Exception as e:
++            self.kill.record_api_disconnect(str(e))
++            return
+ 
+         # DEMO: Update risk/kill logic (stub)
+         fake_pnl = 0  # replace with real PnL calc as needed
+         self.risk.update_drawdown(fake_pnl)
+         self.kill.update_pnl(fake_pnl)
+-        if not self.kill.is_enabled():
+-            print("[MEVBot] Kill switch triggered. Exiting.")
+-            send_telegram("KILL SWITCH: Trading disabled!", self.config['notifier'].get('telegram_token',''), self.config['notifier'].get('telegram_chat_id',''))
++
++        if self.kill.state == KillSwitch.HALT:
++            print("[MEVBot] Kill switch HALT. Exiting.")
++            notify_founder("KILL SWITCH HALT", self.config.get('notifier', {}))
++            return
++        if self.kill.state >= KillSwitch.PAUSE:
++            print("[MEVBot] Trading paused by KillSwitch.")
+             return
+         # ... extend with further strategies or module hooks
+ 
+ if __name__ == "__main__":
+     bot = MEVBot()
+     bot.run()
+diff --git a/src/notifier.py b/src/notifier.py
+index 3df548d..50f900e 100644
+--- a/src/notifier.py
++++ b/src/notifier.py
+@@ -1,17 +1,35 @@
+ import logging
+ import requests
+ 
++
++def notify_founder(msg: str, notifier_cfg: dict) -> None:
++    """Escalate critical alerts directly to the founder."""
++    token = notifier_cfg.get("telegram_token")
++    chat_id = notifier_cfg.get("founder_chat_id") or notifier_cfg.get("telegram_chat_id")
++    ok = send_telegram(msg, token, chat_id)
++    if not ok:
++        email = notifier_cfg.get("email")
++        send_email(msg, email)
++
+ def send_telegram(msg, token, chat_id):
+     if not token or not chat_id:
+         logging.info("[Notifier] Telegram not configured.")
+         return
+     url = f"https://api.telegram.org/bot{token}/sendMessage"
+     try:
+-        requests.post(url, data={"chat_id": chat_id, "text": msg})
++        r = requests.post(url, data={"chat_id": chat_id, "text": msg})
++        if r.status_code != 200:
++            raise RuntimeError(f"HTTP {r.status_code}")
+         logging.info("[Notifier] Sent Telegram message.")
++        return True
+     except Exception as e:
+         logging.warning(f"[Notifier] Failed Telegram: {e}")
++        return False
+ 
+ def send_email(msg, email):
+-    # Placeholder – integrate with SendGrid, SMTP, etc.
++    if not email:
++        logging.error("[Notifier] Email fallback not configured.")
++        return False
++    # Placeholder – integrate with real provider
+     logging.info(f"[Notifier] Would send email to {email}: {msg}")
++    return True
+diff --git a/src/risk_manager.py b/src/risk_manager.py
+index 1c2f6b0..c1ac8cd 100644
+--- a/src/risk_manager.py
++++ b/src/risk_manager.py
+@@ -1,21 +1,38 @@
+ import logging
++from typing import Dict
++
++from .kill_switch import KillSwitch
++
+ 
+ class RiskManager:
+-    def __init__(self, config):
++    def __init__(self, config: Dict, kill_switch: KillSwitch):
++        self.kill_switch = kill_switch
++        if hasattr(self.kill_switch, "attach_risk_manager"):
++            self.kill_switch.attach_risk_manager(self)
+         self.max_drawdown_pct = config.get("risk", {}).get("max_drawdown_pct", 5)
+         self.max_loss_usd = config.get("risk", {}).get("max_loss_usd", 200)
+         self.max_trade_size_usd = config.get("trade_amount_usd", 100)
+         self.current_drawdown = 0
+ 
+-    def check_trade(self, trade_size_usd):
+-        if trade_size_usd > self.max_trade_size_usd:
++    def check_trade(self, trade_size_usd: float) -> float:
++        if self.kill_switch.state >= KillSwitch.PAUSE:
++            logging.warning("[RiskManager] Trading paused by KillSwitch")
++            return 0
++
++        if self.kill_switch.state == KillSwitch.REDUCE_RISK:
++            trade_size_usd = min(trade_size_usd, self.max_trade_size_usd / 2)
++        elif trade_size_usd > self.max_trade_size_usd:
+             logging.warning("[RiskManager] Trade size too large, reducing.")
+-            return self.max_trade_size_usd
++            trade_size_usd = self.max_trade_size_usd
+         return trade_size_usd
+ 
+-    def update_drawdown(self, pnl):
++    def update_drawdown(self, pnl: float) -> bool:
+         self.current_drawdown += pnl
+         if abs(self.current_drawdown) > self.max_loss_usd:
+             logging.critical("[RiskManager] Max drawdown breached!")
++            if hasattr(self.kill_switch, "record_risk_breach"):
++                self.kill_switch.record_risk_breach("drawdown")
++            else:  # pragma: no cover - old API fallback
++                self.kill_switch.manual_override(KillSwitch.HALT, "drawdown")
+             return False
+         return True
+diff --git a/src/utils.py b/src/utils.py
+index 5577185..477a869 100644
+--- a/src/utils.py
++++ b/src/utils.py
+@@ -1,15 +1,13 @@
+ import yaml
+ import os
+ from dotenv import load_dotenv
++from .core.config_manager import load_app_config
+ 
+ def load_config(path="config.yaml"):
+     if os.path.exists('.env'):
+         load_dotenv('.env')
+-    with open(path, "r") as f:
+-        config = yaml.safe_load(f)
+-    # Override with env vars if present
+-    for key in ["alchemy_api_key", "private_key", "wallet_address"]:
+-        env_val = os.environ.get(key.upper())
+-        if env_val:
+-            config[key] = env_val
+-    return config
++    try:
++        cfg = load_app_config(path)
++    except Exception as e:
++        raise RuntimeError(f"Config load failed: {e}")
++    return cfg.model_dump()
+diff --git a/tests/test_chaos.py b/tests/test_chaos.py
+new file mode 100644
+index 0000000..905fa16
+--- /dev/null
++++ b/tests/test_chaos.py
+@@ -0,0 +1,33 @@
++from src.kill_switch import KillSwitch
++from src.risk_manager import RiskManager
++from src.notifier import notify_founder
++
++EVENTS = []
++
++def dummy_notifier(msg):
++    EVENTS.append(msg)
++
++CFG = {
++    "risk": {"max_loss_usd": 5},
++    "kill_switch_enabled": True,
++    "kill_switch_max_errors": 1,
++    "trade_amount_usd": 1,
++    "notifier": {"telegram_token": "x", "founder_chat_id": "1", "email": "f@example.com"},
++}
++
++
++def test_chaos_sequence(monkeypatch):
++    ks = KillSwitch(CFG, notifier=dummy_notifier)
++    rm = RiskManager(CFG, ks)
++
++    # notifier outage -> telegram fails
++    monkeypatch.setattr('src.notifier.requests.post', lambda *a, **k: (_ for _ in ()).throw(Exception('fail')))
++
++    ks.record_trade_error('trade fail1')
++    ks.record_api_disconnect('rpc fail')
++    ks.manual_override(KillSwitch.HALT, 'unauth', confirm=False, source='unauth')
++    rm.update_drawdown(-10)
++
++    assert ks.state == KillSwitch.HALT
++    assert any('HALT' in e for e in EVENTS)
++
+diff --git a/tests/test_kill_switch.py b/tests/test_kill_switch.py
+new file mode 100644
+index 0000000..6d22b57
+--- /dev/null
++++ b/tests/test_kill_switch.py
+@@ -0,0 +1,49 @@
++import pytest
++from src.kill_switch import KillSwitch
++from src.risk_manager import RiskManager
++
++BASIC_CFG = {
++    "risk": {"max_loss_usd": 10},
++    "kill_switch_enabled": True,
++    "kill_switch_max_errors": 2,
++    "trade_amount_usd": 10,
++    "notifier": {"telegram_token": "x", "founder_chat_id": "1"},
++}
++
++def dummy_notifier(msg):
++    pass
++
++
++def test_trade_error_escalation():
++    ks = KillSwitch(BASIC_CFG, notifier=dummy_notifier)
++    ks.record_trade_error("fail")
++    ks.record_trade_error("fail")
++    assert ks.state == KillSwitch.PAUSE
++    ks.record_trade_error("fail")
++    ks.record_trade_error("fail")
++    assert ks.state == KillSwitch.HALT
++
++
++def test_api_disconnect_escalation():
++    ks = KillSwitch(BASIC_CFG, notifier=dummy_notifier)
++    ks.record_api_disconnect()
++    assert ks.state == KillSwitch.PAUSE
++    ks.record_api_disconnect()
++    assert ks.state == KillSwitch.HALT
++
++
++def test_risk_breach_triggers_halt():
++    ks = KillSwitch(BASIC_CFG, notifier=dummy_notifier)
++    rm = RiskManager(BASIC_CFG, ks)
++    rm.update_drawdown(-5)
++    assert ks.state == KillSwitch.RUNNING
++    rm.update_drawdown(-6)
++    assert ks.state == KillSwitch.HALT
++
++
++def test_manual_override():
++    ks = KillSwitch(BASIC_CFG, notifier=dummy_notifier)
++    ks.manual_override(KillSwitch.LIQUIDATE, "maintenance", confirm=True)
++    assert ks.state == KillSwitch.LIQUIDATE
++    ks.manual_override(KillSwitch.HALT, "bad", confirm=False)
++    assert ks.state == KillSwitch.LIQUIDATE  # no change without confirm
+diff --git a/tests/test_mev_bot.py b/tests/test_mev_bot.py
+index d974715..8355f7f 100644
+--- a/tests/test_mev_bot.py
++++ b/tests/test_mev_bot.py
+@@ -1,10 +1,10 @@
+ from src.mev_bot import MEVBot
+ 
+ def test_mev_bot_init_and_run(monkeypatch):
+     # Setup a test config.yaml with dummy/testnet values first
+     bot = MEVBot("config.yaml")
+     assert bot.network in ["mainnet", "goerli", "sepolia"]
+     assert bot.mode in ["test", "live"]
+-    # Monkeypatch kill switch to always be enabled for run()
+-    monkeypatch.setattr(bot.kill, "is_enabled", lambda: True)
++    monkeypatch.setattr(bot.web3.eth, "block_number", 1)
++    bot.kill.state = bot.kill.RUNNING
+     bot.run()
+diff --git a/tests/test_trading_integration.py b/tests/test_trading_integration.py
+new file mode 100644
+index 0000000..4354118
+--- /dev/null
++++ b/tests/test_trading_integration.py
+@@ -0,0 +1,18 @@
++import ast, os
++
++ALPHA_DIR = os.path.join('src', 'alpha')
++
++REQUIRED_CALLS = ['update_pnl', 'update_drawdown']
++
++
++def test_trading_functions_call_updates():
++    for fn in os.listdir(ALPHA_DIR):
++        if not fn.endswith('.py'):
++            continue
++        path = os.path.join(ALPHA_DIR, fn)
++        tree = ast.parse(open(path).read())
++        for node in ast.walk(tree):
++            if isinstance(node, ast.FunctionDef) and node.name.startswith('execute_'):
++                body = ast.get_source_segment(open(path).read(), node)
++                for call in REQUIRED_CALLS:
++                    assert call in body, f"{fn}:{node.name} missing {call}"
+ 
+EOF
+)

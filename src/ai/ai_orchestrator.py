@@ -4,6 +4,7 @@ import importlib
 import openai
 import os
 from src.utils import load_config
+from src.safety.config_monitor import ConfigMonitor
 
 OPENAI_MODEL = "gpt-4o"  # Or use "gpt-3.5-turbo" if needed
 
@@ -12,6 +13,7 @@ class AIOrchestrator:
         self.config_path = config_path
         self.config = load_config(config_path)
         openai.api_key = os.environ.get("OPENAI_API_KEY")
+        self.monitor = ConfigMonitor(config_path, ".env", notifier_cfg=self.config.get("notifier", {}))
         self.alpha_modules = [
             "cross_chain_arb",
             "l2_sandwich",
@@ -71,6 +73,7 @@ class AIOrchestrator:
     def main_loop(self, interval_sec=600):
         logging.info("[AIOrchestrator] Starting perpetual alpha coordination loop.")
         while True:
+            self.monitor.check()
             for module in self.alpha_modules:
                 self.run_module(module, mode=self.config.get("mode", "test"))
                 time.sleep(3)  # Stagger modules

@@ -49,6 +49,8 @@ def main():
     else:
         bot = MEVBot()
         bot.run()
+        if bot.kill.state >= bot.kill.HALT:
+            logging.critical("Kill switch HALT state reached. Exiting main.")
 
 if __name__ == "__main__":
     main()

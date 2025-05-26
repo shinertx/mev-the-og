@@ -1,5 +1,7 @@
 import logging
 import time
+from src.kill_switch import get_kill_switch
+from src.risk_manager import RiskManager
 
 def find_liquidation_targets():
     # TODO: Connect to Aave/Compound API or subgraph
@@ -8,7 +10,13 @@ def find_liquidation_targets():
 def execute_flash_loan_liquidation(target):
     logging.info(f"[FLL] Executing flash loan liquidation on {target['account']}")
     # TODO: Call flash loan + liquidation contract
-    return True
+    success = True
+    pnl = 0.0  # placeholder
+    kill = get_kill_switch()
+    rm: RiskManager = kill.risk_manager  # type: ignore[attr-defined]
+    rm.update_drawdown(pnl)
+    kill.update_pnl(pnl)
+    return success
 
 def run_flash_loan_liquidation(config):
     logging.info("[FLL] Running flash loan liquidation cascade module...")

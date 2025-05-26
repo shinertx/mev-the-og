@@ -1,0 +1,92 @@
+.
+├── .coverage
+├── .env
+├── .env.example
+├── .gitignore
+├── .pytest_cache
+│   ├── .gitignore
+│   ├── CACHEDIR.TAG
+│   ├── README.md
+│   └── v
+│       └── cache
+│           ├── lastfailed
+│           ├── nodeids
+│           └── stepwise
+├── Dockerfile
+├── PROJECT_BIBLE.md
+├── README.md
+├── agents.md
+├── config.example.yaml
+├── config.yaml
+├── data
+├── full-file-tree.txt
+├── logs
+│   └── mev_og.log
+├── main.py
+├── poetry.lock
+├── pyproject.toml
+├── pytest.ini
+├── requirements.txt
+├── run.sh
+├── src
+│   ├── __init__.py
+│   ├── ai
+│   │   ├── ai_orchestrator.py
+│   │   ├── alpha_scraper.py
+│   │   ├── auto_scaler.py
+│   │   ├── edge_pruner.py
+│   │   └── edge_watcher.py
+│   ├── alpha
+│   │   ├── .env.example
+│   │   ├── __init__.py
+│   │   ├── bridge_games.py
+│   │   ├── cex_dex_flash_arb.py
+│   │   ├── cross_chain_arb.py
+│   │   ├── cross_layer_sandwich.py
+│   │   ├── flash_loan.py
+│   │   ├── flash_loan_liquidation.py
+│   │   ├── l2_sandwich.py
+│   │   ├── liquidation.py
+│   │   ├── mev_share.py
+│   │   ├── mev_share_intent_sniper.py
+│   │   ├── nftfi.py
+│   │   └── sequencer_auction_sniper.py
+│   ├── core
+│   │   ├── __init__.py
+│   │   └── config_manager.py
+│   ├── dashboard.py
+│   ├── kill_switch.py
+│   ├── mev_bot.py
+│   ├── monitoring.py
+│   ├── notifier.py
+│   ├── risk_manager.py
+│   ├── safety
+│   │   └── honeypot_scanner.py
+│   ├── services
+│   │   ├── __init__.py
+│   │   └── blockchain_service.py
+│   ├── signer_service.py
+│   ├── transaction_manager
+│   └── utils.py
+├── tests
+│   ├── adversarial
+│   ├── conftest.py
+│   ├── test_bridge_games.py
+│   ├── test_chaos.py
+│   ├── test_config_manager.py
+│   ├── test_cross_chain_arb.py
+│   ├── test_cross_layer_sandwich.py
+│   ├── test_flash_loan.py
+│   ├── test_flash_loan_liquidation.py
+│   ├── test_kill_switch.py
+│   ├── test_l2_sandwich.py
+│   ├── test_liquidation.py
+│   ├── test_mev_bot.py
+│   ├── test_mev_share.py
+│   ├── test_mev_share_intent_sniper.py
+│   ├── test_nftfi.py
+│   ├── test_sequencer_auction_sniper.py
+│   └── test_trading_integration.py
+└── update.patch
+
+13 directories, 76 files
